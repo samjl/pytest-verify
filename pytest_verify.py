@@ -21,7 +21,14 @@ def pytest_namespace():
         """Print a message at the highest log level."""
         _verify(msg, fail_condition, *params, **keyword_args)
 
-    name = {"verify": verify}
+    def get_saved_results():
+        """Development only function.
+        TODO: print results at pytest reporting state - add to conftest
+        """
+        return Verifications.saved_results, Verifications.saved_tracebacks
+
+    name = {"verify": verify,
+            "get_saved_results": get_saved_results}
     return name
 
 
@@ -237,7 +244,8 @@ def _save_failed_verification(msg, condition_msg, condition_parsed,
             # Print the complete function source code
             if full_method_trace:
                 for lineNumber in range(0, call_line_number - func_line_number):
-                    trace_level.append(func_source[0][lineNumber])
+                    source_line = re.sub('[\r\n]', '', func_source[0][lineNumber])
+                    trace_level.append(source_line)
 
             else:
                 # Check if the source line parentheses match (equal
@@ -254,12 +262,14 @@ def _save_failed_verification(msg, condition_msg, condition_parsed,
                 preceding_line_index = call_line_number - func_line_number - 1
 
                 while left != right and preceding_line_index > call_line_number - func_line_number - 10:
-                    trace_level.insert(2, func_source[0][preceding_line_index])
+                    source_line = re.sub('[\r\n]', '', func_source[0][preceding_line_index])
+                    trace_level.insert(2, source_line)
                     left, right = _parentheses_count(left, right,
                                                      func_source[0][preceding_line_index])
                     preceding_line_index -= 1
 
-            trace_level.append(">{}".format(func_call_source_line[1:]))
+            source_line = re.sub('[\r\n]', '', func_call_source_line[1:])
+            trace_level.append(">{}".format(source_line))
             # Add to the beginning of the list so the traceback can be
             # printed in reverse order
             trace_complete = trace_level + trace_complete
