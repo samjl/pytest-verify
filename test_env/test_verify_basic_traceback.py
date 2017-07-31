@@ -12,9 +12,9 @@ def test_basic_traceback():
     # verifications.
     saved_results, saved_tracebacks = get_saved_results()
     for saved_tb in saved_tracebacks:
-        print "Traceback:raised: {}".format(saved_tb["raised"])
-        print "Traceback:complete:"
-        print saved_tb["complete"]
+        log.step("Traceback:raised: {}".format(saved_tb["raised"]))
+        log.step("Traceback:complete:")
+        log.step(saved_tb["complete"])
         for line in saved_tb["complete"]:
             log.step(line)  # same output as "print line"
 
