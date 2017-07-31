@@ -8,14 +8,5 @@ def test_basic_traceback():
     verify("Check something is true (passes)", fail_condition, True)
     verify("Check something is true (fails)", fail_condition, False,
            raise_assertion=False)
-    # Retrieve the saved results and traceback info for any failed
-    # verifications.
-    saved_results, saved_tracebacks = get_saved_results()
-    for saved_tb in saved_tracebacks:
-        log.step("Traceback:raised: {}".format(saved_tb["raised"]))
-        log.step("Traceback:complete:")
-        log.step(saved_tb["complete"])
-        for line in saved_tb["complete"]:
-            log.step(line)  # same output as "print line"
 
     log.detail_step("End of test")

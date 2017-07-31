@@ -15,6 +15,28 @@ class VerificationException(Exception):
     pass
 
 
+def pytest_terminal_summary(terminalreporter):
+    """ override the terminal summary reporting. """
+    print "In pytest_terminal_summary"
+
+    # TODO save any immediately raised assertions
+
+    # Retrieve the saved results and traceback info for any failed
+    # verifications.
+    saved_results = Verifications.saved_results
+    pytest.log.high_level_step("Saved results")
+    for save_result in saved_results:
+        pytest.log.step(save_result)
+
+    saved_tracebacks = Verifications.saved_tracebacks
+    pytest.log.high_level_step("Saved tracebacks")
+    for saved_tb in saved_tracebacks:
+        for line in saved_tb["complete"]:
+            pytest.log.step(line)
+
+    # TODO re-raise caught exceptions
+
+
 def pytest_namespace():
     # Add verify functions to the pytest namespace
     def verify(msg, fail_condition, *params, **keyword_args):
@@ -23,7 +45,6 @@ def pytest_namespace():
 
     def get_saved_results():
         """Development only function.
-        TODO: print results at pytest reporting state - add to conftest
         """
         return Verifications.saved_results, Verifications.saved_tracebacks
 
@@ -139,7 +160,6 @@ def _verify(msg, fail_condition, *params, **keyword_args):
             try:
                 assert warn_condition(*warn_args), warning_condition_msg
             except AssertionError:
-                # TODO return the message
                 msg = _save_failed_verification(msg, warning_condition_msg,
                                                 warn_condition_parsed,
                                                 full_method_trace,

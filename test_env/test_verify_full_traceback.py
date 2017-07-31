@@ -40,13 +40,4 @@ def test_logging():
            "function", func, do_something(), raise_assertion=False,
            full_method_trace=True, stop_at_test=False)
 
-    # Retrieve the saved results and traceback info for any failed
-    # verifications.
-    saved_results, saved_tracebacks = get_saved_results()
-    for saved_tb in saved_tracebacks:
-        log.step("* Traceback:raised: {}".format(saved_tb["raised"]))
-        log.step("Traceback:complete:")
-        for line in saved_tb["complete"]:
-            log.step(line)
-
     log.detail_step("End of test")
