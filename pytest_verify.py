@@ -5,6 +5,7 @@ import sys
 from collections import OrderedDict
 
 MAX_TRACEBACK_DEPTH = 11
+DEBUG_PRINT_SAVED = False
 
 
 class WarningException(Exception):
@@ -23,10 +24,7 @@ def pytest_terminal_summary(terminalreporter):
 
     # Retrieve the saved results and traceback info for any failed
     # verifications.
-    saved_results = Verifications.saved_results
-    pytest.log.high_level_step("Saved results")
-    for save_result in saved_results:
-        pytest.log.step(save_result)
+    print_saved_results()
 
     saved_tracebacks = Verifications.saved_tracebacks
     pytest.log.high_level_step("Saved tracebacks")
@@ -312,3 +310,167 @@ def _save_failed_verification(msg, condition_msg, condition_parsed,
                                                     ('Debug', result_info)
                                                     ]))
     return fail_message
+
+
+def print_saved_results(column_key_order="Step", extra_info=False):
+    """Format the saved results as a table and print.
+    The results are printed in the order they were saved.
+    Keyword arguments:
+    column_key_order -- specify the column order. Default is to simply
+    print the "Step" (top level message) first.
+    extra_info -- print an extra column containing the "Debug" field
+    values.
+    """
+    if not isinstance(column_key_order, (tuple, list)):
+        column_key_order = [column_key_order]
+    _debug_print("Column order: {}".format(column_key_order), DEBUG_PRINT_SAVED)
+
+    key_val_lengths = {}
+    if len(Verifications.saved_results) > 0:
+        _get_val_lengths(Verifications.saved_results, key_val_lengths,
+                         extra_info)
+        headings = _get_key_lengths(key_val_lengths, extra_info)
+        pytest.log.high_level_step("Saved results")
+        _print_headings(Verifications.saved_results[0], headings,
+                        key_val_lengths, column_key_order, extra_info)
+
+        for result in Verifications.saved_results:
+            _print_result(result, key_val_lengths, column_key_order,
+                          extra_info)
+
+
+def _print_result(result, key_val_lengths, column_key_order, extra_info):
+    # Print a table row for a single saved result.
+    if not DEBUG_PRINT_SAVED and result["Debug"].printed == "Y":
+        return
+    line = ""
+    for key in column_key_order:
+        # Print values in the order defined by column_key_order.
+        length = key_val_lengths[key]
+        line += '| {0:^{width}} '.format(str(result[key]), width=length)
+    for key in result.keys():
+        if not extra_info and key == "Debug":
+            continue
+        key = key.strip()
+        if key not in column_key_order:
+            length = key_val_lengths[key]
+            if key == "Debug":
+                val = result[key].format_result_info()
+            else:
+                val = result[key]
+            line += '| {0:^{width}} '.format(str(val), width=length)
+    line += "|"
+    pytest.log.detail_step(line)
+
+
+def _get_val_lengths(saved_results, key_val_lengths, extra_info):
+    # Update the maximum field length dictionary based on the length of
+    # the values.
+    for result in saved_results:
+        for key, value in result.items():
+            if not extra_info and key == "Debug":
+                continue
+            key = key.strip()
+            if key not in key_val_lengths:
+                key_val_lengths[key] = 0
+            if key == "Debug":
+                length = max(key_val_lengths[key],
+                             len(str(value.format_result_info())))
+            else:
+                length = max(key_val_lengths[key], len(str(value)))
+            key_val_lengths[key] = length
+
+
+def _get_key_lengths(key_val_lengths, extra_info):
+    # Compare the key lengths to the max length of the corresponding
+    # value.
+
+    # Dictionary to store the keys (spilt if required) that form the
+    # table headings.
+    headings = {}
+    for key, val in key_val_lengths.iteritems():
+        _debug_print("key: {}, key length: {}, length of field from values "
+                     "{}".format(key, len(key), val), DEBUG_PRINT_SAVED)
+        if not extra_info and key == "Debug":
+            continue
+        if len(key) > val:
+            # The key is longer then the value length
+            if ' ' in key or '/' in key:
+                # key can be split up to create multi-line heading
+                space_indices = [m.start() for m in re.finditer(' ', key)]
+                slash_indices = [m.start() for m in re.finditer('/', key)]
+                space_indices.extend(slash_indices)
+                _debug_print("key can be split @ {}".format(space_indices),
+                             DEBUG_PRINT_SAVED)
+                key_centre_index = int(len(key)/2)
+                split_index = min(space_indices, key=lambda x: abs(
+                    x - key_centre_index))
+                _debug_print('The closest index to the middle ({}) is {}'
+                             .format(key_centre_index, split_index),
+                             DEBUG_PRINT_SAVED)
+                # Add the split key string as two strings (line 1, line
+                # 2) to the headings dictionary.
+                headings[key] = [key[:split_index+1].strip(),
+                                 key[split_index+1:]]
+                # Update the lengths dictionary with the shortened
+                # headings (The max length of the two lines)
+                key_val_lengths[key] = max(len(headings[key][0]),
+                                           len(headings[key][1]),
+                                           key_val_lengths[key])
+            # and can't be split
+            else:
+                key_val_lengths[key] = max(len(key), key_val_lengths[key])
+                headings[key] = [key, ""]
+        else:
+            key_val_lengths[key] = max(len(key), key_val_lengths[key])
+            headings[key] = [key, ""]
+
+    return headings
+
+
+def _get_line_length(key_val_lengths):
+    # Return the line length based upon the max key/value lengths of
+    # the saved results.
+    line_length = 0
+    # Calculate the line length (max length of all keys/values)
+    for key in key_val_lengths:
+        line_length += key_val_lengths[key] + 3
+    line_length += 1
+    return line_length
+
+
+def _print_headings(first_result, headings, key_val_lengths,
+                    column_key_order, extra_info):
+    # Print the headings of the saved results table (keys of
+    # dictionaries stored in saved_results).
+    lines = ["", "", ""]
+    line_length = _get_line_length(key_val_lengths)
+    pytest.log.detail_step("_" * line_length)
+    for key in column_key_order:
+        field_length = key_val_lengths[key]
+        for line_index in (0, 1):
+            lines[line_index] += '| ' + '{0:^{width}}'.format(
+                headings[key][line_index], width=field_length) + ' '
+        lines[2] += '|-' + '-'*field_length + '-'
+    for key, value in first_result.items():
+        if not extra_info and key == "Debug":
+            continue
+        key = key.strip()
+        if not (((type(column_key_order) is list) and
+                 (key in column_key_order)) or
+                ((type(column_key_order) is not list) and
+                 (key == column_key_order))):
+            field_length = key_val_lengths[key]
+            for line_index in (0, 1):
+                lines[line_index] += ('| ' + '{0:^{width}}'.format(
+                    headings[key][line_index], width=field_length) + ' ')
+            lines[2] += ('|-' + '-'*field_length + '-')
+    for line in lines:
+        line += "|"
+        pytest.log.detail_step(line)
+
+
+def _debug_print(msg, flag):
+    # Print a debug message if the corresponding flag is set.
+    if flag:
+        print msg
