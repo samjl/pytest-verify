@@ -3,9 +3,11 @@ import pytest
 import re
 import sys
 from collections import OrderedDict
+from future.utils import raise_
 
-MAX_TRACEBACK_DEPTH = 11
+MAX_TRACEBACK_DEPTH = 20
 DEBUG_PRINT_SAVED = False
+DEBUG_VERIFY = False
 
 
 class WarningException(Exception):
@@ -16,30 +18,69 @@ class VerificationException(Exception):
     pass
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_pyfunc_call(pyfuncitem):
+    _debug_print("CALL (test) - Starting test {}".format(pyfuncitem),
+                 DEBUG_VERIFY)
+    outcome = yield
+    _debug_print("CALL (test) - Completed test {}, outcome {}".
+                 format(pyfuncitem, outcome), DEBUG_VERIFY)
+    # outcome.excinfo may be None or a (cls, val, tb) tuple
+    raised_exc = outcome.excinfo
+    print "Caught exception: {}".format(raised_exc)
+    if raised_exc:
+        if raised_exc[0] not in (WarningException, VerificationException):
+            # TODO save assertion so it can be printed in the results table
+            raise_(*raised_exc)
+
+    # Re-raise caught exceptions
+    for i, saved_traceback in enumerate(Verifications.saved_tracebacks):
+        exc_type = saved_traceback["type"]
+        _debug_print("saved traceback index: {}, type: {}".format(i, exc_type),
+                     DEBUG_VERIFY)
+        if exc_type:
+            msg = "{0[Message]} - {0[Status]}".format(
+                Verifications.saved_results[i])
+            tb = saved_traceback["tb"]
+            print "Re-raising first saved exception: {} {} {}".format(
+                exc_type, msg, tb)
+            raise_(exc_type, msg, tb)  # for python 2 and 3 compatibility
+
+
 def pytest_terminal_summary(terminalreporter):
     """ override the terminal summary reporting. """
     print "In pytest_terminal_summary"
-
-    # TODO save any immediately raised assertions
 
     # Retrieve the saved results and traceback info for any failed
     # verifications.
     print_saved_results()
 
+    saved_results = Verifications.saved_results
+    pytest.log.high_level_step("Saved results")
+    for saved_res in saved_results:
+        pytest.log.step(saved_res)
+
     saved_tracebacks = Verifications.saved_tracebacks
     pytest.log.high_level_step("Saved tracebacks")
-    for saved_tb in saved_tracebacks:
+    for i, saved_tb in enumerate(saved_tracebacks):
+        print saved_tb
         for line in saved_tb["complete"]:
             pytest.log.step(line)
-
-    # TODO re-raise caught exceptions
+        exc_type = saved_tb["type"]
+        pytest.log.step("{0}{1[Message]}".format("{}: ".format(
+                        exc_type.__name__) if exc_type else "",
+                        Verifications.saved_results[i]))
 
 
 def pytest_namespace():
     # Add verify functions to the pytest namespace
-    def verify(msg, fail_condition, *params, **keyword_args):
+    def verify(fail_condition, fail_message, raise_assertion=True,
+               warning=False, warn_condition=None, warn_message=None,
+               full_method_trace=False, stop_at_test=True, log_level=None):
         """Print a message at the highest log level."""
-        _verify(msg, fail_condition, *params, **keyword_args)
+        _verify(fail_condition, fail_message, raise_assertion,
+                warning, warn_condition, warn_message,
+                full_method_trace, stop_at_test, log_level)
 
     def get_saved_results():
         """Development only function.
@@ -94,222 +135,203 @@ def _log_verification(msg, log_level):
     pytest.redirect.set_level(log_level_restore)
 
 
-def _verify(msg, fail_condition, *params, **keyword_args):
+def _verify(fail_condition, fail_message, raise_assertion, warning,
+            warn_condition, warn_message, full_method_trace,
+            stop_at_test, log_level):
     """Perform a verification of a given condition using the parameters
     provided.
     """
-    # Parse any keyword arguments
-    if "raise_assertion" in keyword_args:
-        raise_assertion = keyword_args["raise_assertion"]
-    else:
-        raise_assertion = True
-    if "full_method_trace" in keyword_args:
-        full_method_trace = keyword_args["full_method_trace"]
-    else:
-        full_method_trace = False
-    if "stop_at_test" in keyword_args:
-        stop_at_test = keyword_args["stop_at_test"]
-    else:
-        stop_at_test = True
-    if "log_level" in keyword_args:
-        log_level = keyword_args["log_level"]
-    else:
-        log_level = None
-        # log_level = current_log_level + 1
-    if "warning" in keyword_args:
-        warning = keyword_args["warning"]
-    else:
-        warning = False
     if warning:
         raise_assertion = False
-    if "warn_condition" in keyword_args:
-        warn_condition = keyword_args["warn_condition"]
-    else:
-        warn_condition = None
-    if "warn_args" in keyword_args:
-        warn_args = keyword_args["warn_args"]
-    else:
-        warn_args = None
 
-    fail_condition_parsed = _parse_condition_args(fail_condition, params)
-    fail_condition_msg = "{0} ({1[params]}: {1[condition]}, Args: {1[args]})"\
-        .format(msg, fail_condition_parsed)
-    try:
-        assert fail_condition(*params), fail_condition_msg
-    except AssertionError:
-        msg = _save_failed_verification(msg, fail_condition_msg,
-                                        fail_condition_parsed,
-                                        full_method_trace, stop_at_test,
-                                        raise_assertion, warning=warning)
-        _log_verification(msg, log_level)
-        if raise_assertion:
-            # Raise the exception - test immediately ends
-            exc_info = list(sys.exc_info())
-            # FIXME deprecated raise format
-            raise VerificationException, exc_info[1], exc_info[2]
-        return False
-    else:
-        if warn_condition is not None and warn_args is not None:
-            warn_condition_parsed = _parse_condition_args(warn_condition,
-                                                          warn_args)
-            warning_condition_msg = "{0} ({1[params]}: {1[condition]}, Args: "\
-                                    "{1[args]})".format(msg,
-                                                        warn_condition_parsed)
-            try:
-                assert warn_condition(*warn_args), warning_condition_msg
-            except AssertionError:
-                msg = _save_failed_verification(msg, warning_condition_msg,
-                                                warn_condition_parsed,
-                                                full_method_trace,
-                                                stop_at_test, False,
-                                                warning=True)
-                _log_verification(msg, log_level)
-                # Don't raise warnings during test execution
-                return False
+    _debug_print("'*** PERFORMING VERIFICATION ***", DEBUG_VERIFY)
+    _debug_print("LOCALS: {}".format(inspect.getargvalues(inspect.stack()[1][0]).locals),
+                 DEBUG_VERIFY)
 
-        status = "PASS"
-
-        _log_verification("{} - {}".format(fail_condition_msg, status),
-                          log_level)
-
-        result_info = ResultInfo(type="P", printed="-", raise_immediately="-",
-                                 tb_index="-")
-
-        Verifications.saved_results.append(OrderedDict([('Step',
-                                                         pytest.redirect.get_current_l1_msg()),
-                                                        ('Message', msg),
-                                                        ('Status', status),
-                                                        ('Pass Condition', fail_condition_parsed['condition']),
-                                                        ('Args', fail_condition_parsed['args']),
-                                                        ('Debug', result_info)
-                                                        ]))
-        return True
-
-
-def _parse_condition_args(condition, params):
-    # Inspect the stack and extract source of the lambda function
-    # condition.
-    lambda_func = inspect.getsource(condition).strip()
-    lambda_search = re.search("(lambda .*): *((.*)\),|(.*))", lambda_func)
-
-    arg_val = []
-    for index, arg in enumerate(inspect.getargspec(condition).args):
-        arg_val.append("{}: {}".format(arg, params[index]))
-    args = ", ".join(arg_val)
-    lambda_params = lambda_search.group(1)
-    if lambda_search.group(3) is not None:
-        lambda_condition = lambda_search.group(3)
-    else:
-        lambda_condition = lambda_search.group(4)
-
-    return {"condition": lambda_condition, "params": lambda_params,
-            "args": args}
-
-
-def _save_failed_verification(msg, condition_msg, condition_parsed,
-                              full_method_trace, stop_at_test, raise_assertion,
-                              warning=False):
-    # Save a failed verification as FAIL or WARNING.
-    # The verification condition, params and arguments are logged and
-    # the traceback is saved.
-    # A log message is created and returned to the calling function.
-    exc_info = list(sys.exc_info())
-    result_info = ResultInfo(printed="N")
-    if not warning:
-        status = "FAIL"
-        exc_info[0] = VerificationException
-        result_info.type = "F"
-        result_info.raiseImmediately = "Y" if raise_assertion else "N"
-    else:
+    def warning_init():
+        _debug_print("WARNING (fail_condition)", DEBUG_VERIFY)
+        info = ResultInfo(type="W", printed="-", raise_immediately="N")
         status = "WARNING"
-        exc_info[0] = WarningException
-        result_info.type = "W"
-        result_info.raiseImmediately = "N"
-    fail_message = "{}: {} - {}".format(exc_info[0].__name__, condition_msg,
-                                        status)
-    stack = inspect.stack()
-    trace_complete = [fail_message]
+        exc_type = WarningException
+        try:
+            raise WarningException()
+        except WarningException:
+            tb = sys.exc_info()[2]
+        return info, status, exc_type, tb
+
+    def failure_init():
+        info = ResultInfo(type="F", printed="-", raise_immediately="N")
+        status = "FAIL"
+        exc_type = VerificationException
+        try:
+            raise VerificationException()
+        except VerificationException:
+            tb = sys.exc_info()[2]
+        return info, status, exc_type, tb
+
+    def pass_init():
+        info = ResultInfo(type="P", printed="-", raise_immediately="-")
+        status = "PASS"
+        tb = None
+        exc_type = None
+        return info, status, exc_type, tb
+
+    if not fail_condition:
+        msg = fail_message
+        if warning:
+            info, status, exc_type, tb = warning_init()
+        else:
+            info, status, exc_type, tb = failure_init()
+    elif warn_condition is not None:
+        if not warn_condition:
+            info, status, exc_type, tb = warning_init()
+            msg = warn_message
+        else:
+            # Passed
+            info, status, exc_type, tb = pass_init()
+            msg = fail_message
+    else:
+        # Passed
+        info, status, exc_type, tb = pass_init()
+        msg = fail_message
+
+    pytest.log.step("{} - {}".format(msg, status))
+    _save_result(info, msg, status, tb, exc_type, stop_at_test,
+                 full_method_trace)
+
+    if not fail_condition and raise_assertion:
+        # Raise immediately
+        raise_(exc_type, msg, tb)
+    return True
+
+
+def _get_complete_traceback(stack, start_depth, stop_at_test,
+                            full_method_trace, tb=[]):
+    # Print call lines or source code back to beginning of each calling
+    # function (fullMethodTrace).
     if len(stack) > MAX_TRACEBACK_DEPTH:
+        _debug_print("Length of stack = {}".format(len(stack)), DEBUG_VERIFY)
         max_traceback_depth = MAX_TRACEBACK_DEPTH
     else:
         max_traceback_depth = len(stack)
 
-    # Just print call lines or source code back to beginning of each
-    # calling function (fullMethodTrace)
-    for depth in range(3, max_traceback_depth):
-        # Skip levels 0 and 1 - this method and verify()
-        try:
-            # Get the source code, line number for the function
-            func_source = inspect.getsourcelines(stack[depth][0])
-        except Exception:
-            pass
+    for depth in range(start_depth, max_traceback_depth):  # Already got 3
+        calling_func = _get_calling_func(stack, depth, stop_at_test,
+                                         full_method_trace)
+        if calling_func:
+            source_call, source_locals, func_call_complete = calling_func
+            tb_new = [source_call, source_locals]
+            tb_new.extend(func_call_complete)
+            tb[0:0] = tb_new
         else:
-            # Calling function source file line number
-            func_line_number = func_source[1]
-            # The calling line of source code within the function
-            func_call_source_line = "{0[4][0]}".format(stack[depth])
+            break
+    return tb
 
-            stop_keywords = ("runTest", "testfunction", "fixturefunc")
-            if stop_at_test and any(item in func_call_source_line.strip() for item in stop_keywords):
-                break
 
-            # Line number of calling line
-            call_line_number = stack[depth][2]
-            # Construct the traceback output for the current traceback depth
-            trace_level = ["{0[1]}:{0[2]}:{0[3]}".format(stack[depth])]
-            frame_locals = inspect.getargvalues(stack[depth][0]).locals.items()
-            trace_level.append(", ".join("{}: {}".format(k, v) for k, v in frame_locals))
-            # Print the complete function source code
-            if full_method_trace:
-                for lineNumber in range(0, call_line_number - func_line_number):
-                    source_line = re.sub('[\r\n]', '', func_source[0][lineNumber])
-                    trace_level.append(source_line)
+def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
+    calling_source = []
+    stop_keywords = ("runTest", "testfunction", "fixturefunc")
+    try:
+        func_source = inspect.getsourcelines(stack[depth][0])
+    except Exception:
+        return
+    else:
+        func_line_number = func_source[1]
+        func_call_source_line = "{0[4][0]}".format(stack[depth])
+        if stop_at_test and any(item in func_call_source_line.strip() for item in stop_keywords):
+            return
+        call_line_number = stack[depth][2]
+        module_line_parent = "{0[1]}:{0[2]}:{0[3]}".format(stack[depth])  # []
+        calling_frame_locals = (", ".join("{}: {}".format(k, v)
+                                for k, v in inspect.getargvalues(stack[depth][0]).locals.items()))
+        _debug_print("CALL: {}".format(module_line_parent), DEBUG_VERIFY)
+        if full_method_trace:
+            for lineNumber in range(0, call_line_number - func_line_number):
+                source_line = re.sub('[\r\n]', '', func_source[0][lineNumber])
+                calling_source.append(source_line)
+            source_line = re.sub('[\r\n]', '', func_source[0][
+                call_line_number-func_line_number][1:])
+            calling_source.append(">{}".format(source_line))
+        else:
+            calling_source = _get_call_source(func_source,
+                                              func_call_source_line,
+                                              call_line_number,
+                                              func_line_number)
+        return module_line_parent, calling_frame_locals, calling_source
 
-            else:
-                # Check if the source line parentheses match (equal
-                # number of "(" and ")" characters)
-                left = 0
-                right = 0
 
-                def _parentheses_count(left, right, line):
-                    left += line.count("(")
-                    right += line.count(")")
-                    return left, right
-                left, right = _parentheses_count(left, right,
-                                                 func_call_source_line)
-                preceding_line_index = call_line_number - func_line_number - 1
+def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
+                 full_method_trace):
+    """Save a result of verify/_verify.
+    Items to save:
+    Saved result - Step,
+                   Message,
+                   Debug
+    Traceback - tb(?),
+                complete,
+                source_function, (move to saved_results?)
+                source_call,
+                source_locals,
+                raised (also in debug?)
+    """
+    stack = inspect.stack()
+    depth = 3
 
-                while left != right and preceding_line_index > call_line_number - func_line_number - 10:
-                    source_line = re.sub('[\r\n]', '', func_source[0][preceding_line_index])
-                    trace_level.insert(2, source_line)
-                    left, right = _parentheses_count(left, right,
-                                                     func_source[0][preceding_line_index])
-                    preceding_line_index -= 1
+    source_call, source_locals, func_call_complete = \
+        _get_calling_func(stack, depth, True, full_method_trace)
+    tb_depth_1 = [source_call, source_locals]
+    tb_depth_1.extend(func_call_complete)
 
-            source_line = re.sub('[\r\n]', '', func_call_source_line[1:])
-            trace_level.append(">{}".format(source_line))
-            # Add to the beginning of the list so the traceback can be
-            # printed in reverse order
-            trace_complete = trace_level + trace_complete
+    depth += 1
+    trace_complete = ""
 
-    # 'raised' keeps track of whether the exception has been raised or not
-    # 'tb' is used to re-raise the exception is required at the end of
-    # the test. However this traces back to the verify:_verify
-    # functions so is not really required.
-    Verifications.saved_tracebacks.append({'tb': exc_info,
-                                           'complete': trace_complete,
-                                           'raised': False})
-    # 'Debug' for debugging use only - keep track of whether the
-    # verification result has been printed yet
+    if result_info.type == "F" or result_info.type == "W":
+        trace_complete = _get_complete_traceback(stack, depth, stop_at_test,
+                                                 full_method_trace,
+                                                 tb=tb_depth_1)
+
+    s_res = Verifications.saved_results
+    s_tb = Verifications.saved_tracebacks
+    s_tb.append({"type": exc_type,
+                 'tb': tb,  # exc_info
+                 'complete': trace_complete,
+                 "source_function": func_call_complete,
+                 "source_call": source_call,
+                 "source_locals": source_locals,
+                 'raised': False})
     result_info.tbIndex = len(Verifications.saved_tracebacks) - 1
-    Verifications.saved_results.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
-                                                    ('Message', msg),
-                                                    ('Status', status),
-                                                    ('Pass Condition', condition_parsed['condition']),
-                                                    ('Args', condition_parsed['args']),
-                                                    ('Debug', result_info)
-                                                    ]))
-    return fail_message
+    s_res.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
+                              ('Message', msg),
+                              ('Status', status),
+                              ('Debug', result_info)]))
+
+
+def _get_call_source(func_source, func_call_source_line, call_line_number,
+                     func_line_number):
+    trace_level = []
+    # Check if the source line parentheses match (equal
+    # number of "(" and ")" characters)
+    left = 0
+    right = 0
+
+    def _parentheses_count(left, right, line):
+        left += line.count("(")
+        right += line.count(")")
+        return left, right
+    left, right = _parentheses_count(left, right,
+                                     func_call_source_line)
+    preceding_line_index = call_line_number - func_line_number - 1
+
+    while left != right and preceding_line_index > call_line_number - func_line_number - 10:
+        source_line = re.sub('[\r\n]', '', func_source[0][preceding_line_index])
+        trace_level.insert(0, source_line)
+        left, right = _parentheses_count(left, right,
+                                         func_source[0][preceding_line_index])
+        preceding_line_index -= 1
+
+    source_line = re.sub('[\r\n]', '', func_call_source_line[1:])
+    trace_level.append(">{}".format(source_line))
+    return trace_level
 
 
 def print_saved_results(column_key_order="Step", extra_info=False):
