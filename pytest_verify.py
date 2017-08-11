@@ -58,10 +58,10 @@ def pytest_terminal_summary(terminalreporter):
     pytest.log.high_level_step("Saved results")
     for saved_res in saved_results:
         pytest.log.step(saved_res)
-        pytest.log.step(saved_res["Debug"].format_result_info())
-        pytest.log.step(saved_res["Debug"].source_call)
-        pytest.log.step(saved_res["Debug"].source_locals)
-        for line in saved_res["Debug"].source_function:
+        pytest.log.step(saved_res["Extra Info"].format_result_info())
+        pytest.log.step(saved_res["Extra Info"].source_call)
+        pytest.log.step(saved_res["Extra Info"].source_locals)
+        for line in saved_res["Extra Info"].source_function:
             pytest.log.step(line)
 
     saved_tracebacks = Verifications.saved_tracebacks
@@ -277,7 +277,7 @@ def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
     Items to save:
     Saved result - Step,
                    Message,
-                   Debug
+                   Extra Info
     Traceback - tb(?),
                 complete,
                 source_function, (move to saved_results?)
@@ -312,7 +312,7 @@ def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
     s_res.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
                               ('Message', msg),
                               ('Status', status),
-                              ('Debug', result_info)]))
+                              ('Extra Info', result_info)]))
 
 
 def _get_call_source(func_source, func_call_source_line, call_line_number,
@@ -349,7 +349,7 @@ def print_saved_results(column_key_order="Step", extra_info=False):
     Keyword arguments:
     column_key_order -- specify the column order. Default is to simply
     print the "Step" (top level message) first.
-    extra_info -- print an extra column containing the "Debug" field
+    extra_info -- print an extra column containing the "Extra Info" field
     values.
     """
     if not isinstance(column_key_order, (tuple, list)):
@@ -372,7 +372,7 @@ def print_saved_results(column_key_order="Step", extra_info=False):
 
 def _print_result(result, key_val_lengths, column_key_order, extra_info):
     # Print a table row for a single saved result.
-    if not DEBUG_PRINT_SAVED and result["Debug"].printed:
+    if not DEBUG_PRINT_SAVED and result["Extra Info"].printed:
         return
     line = ""
     for key in column_key_order:
@@ -380,12 +380,12 @@ def _print_result(result, key_val_lengths, column_key_order, extra_info):
         length = key_val_lengths[key]
         line += '| {0:^{width}} '.format(str(result[key]), width=length)
     for key in result.keys():
-        if not extra_info and key == "Debug":
+        if not extra_info and key == "Extra Info":
             continue
         key = key.strip()
         if key not in column_key_order:
             length = key_val_lengths[key]
-            if key == "Debug":
+            if key == "Extra Info":
                 val = result[key].format_result_info()
             else:
                 val = result[key]
@@ -399,12 +399,12 @@ def _get_val_lengths(saved_results, key_val_lengths, extra_info):
     # the values.
     for result in saved_results:
         for key, value in result.items():
-            if not extra_info and key == "Debug":
+            if not extra_info and key == "Extra Info":
                 continue
             key = key.strip()
             if key not in key_val_lengths:
                 key_val_lengths[key] = 0
-            if key == "Debug":
+            if key == "Extra Info":
                 length = max(key_val_lengths[key],
                              len(str(value.format_result_info())))
             else:
@@ -422,7 +422,7 @@ def _get_key_lengths(key_val_lengths, extra_info):
     for key, val in key_val_lengths.iteritems():
         _debug_print("key: {}, key length: {}, length of field from values "
                      "{}".format(key, len(key), val), DEBUG_PRINT_SAVED)
-        if not extra_info and key == "Debug":
+        if not extra_info and key == "Extra Info":
             continue
         if len(key) > val:
             # The key is longer then the value length
@@ -484,7 +484,7 @@ def _print_headings(first_result, headings, key_val_lengths,
                 headings[key][line_index], width=field_length) + ' '
         lines[2] += '|-' + '-'*field_length + '-'
     for key, value in first_result.items():
-        if not extra_info and key == "Debug":
+        if not extra_info and key == "Extra Info":
             continue
         key = key.strip()
         if not (((type(column_key_order) is list) and
