@@ -30,7 +30,6 @@ def pytest_pyfunc_call(pyfuncitem):
     print "Caught exception: {}".format(raised_exc)
     if raised_exc:
         if raised_exc[0] not in (WarningException, VerificationException):
-            # TODO save assertion so it can be printed in the results table
             raise_(*raised_exc)
 
     # Re-raise caught exceptions
@@ -59,6 +58,11 @@ def pytest_terminal_summary(terminalreporter):
     pytest.log.high_level_step("Saved results")
     for saved_res in saved_results:
         pytest.log.step(saved_res)
+        pytest.log.step(saved_res["Debug"].format_result_info())
+        pytest.log.step(saved_res["Debug"].source_call)
+        pytest.log.step(saved_res["Debug"].source_locals)
+        for line in saved_res["Debug"].source_function:
+            pytest.log.step(line)
 
     saved_tracebacks = Verifications.saved_tracebacks
     pytest.log.high_level_step("Saved tracebacks")
@@ -102,25 +106,32 @@ class Verifications:
 class ResultInfo:
     # Instances of ResultInfo used to store information on every
     # verification (originating from the verify function) performed.
-    def __init__(self, type="-", printed="N", raise_immediately="-",
-                 tb_index="-", status_printed="N"):
-        self.tbIndex = tb_index
-        self.type = type
-        self.printed = printed
+    def __init__(self, type_code, raise_immediately):
+        # Type codes:
+        # "P": pass, "W": WarningException, "F": VerificationException
+        # "A": AssertionError, "O": any Other exception
+        self.type_code = type_code
+        # Was raise_assertion set?
+        # "Y": Yes, "N": No, "-": N/A (for passed results)
         self.raiseImmediately = raise_immediately
-        self.statusPrinted = status_printed
+
+        self.printed = False
+        self.tb_index = "-"
+        self.source_function = None
+        self.source_call = None
+        self.source_locals = None
 
     def format_result_info(self):
         # Format the result to a human readable string.
-        if isinstance(self.tbIndex, int):
-            if Verifications.saved_tracebacks[int(self.tbIndex)]["raised"]:
+        if isinstance(self.tb_index, int):
+            if Verifications.saved_tracebacks[int(self.tb_index)]["raised"]:
                 raised = "Y"
             else:
                 raised = "N"
         else:
             raised = "-"
-        return "{0.tbIndex}:{0.type}.{0.raiseImmediately}.{0.printed}.{1}"\
-            .format(self, raised)
+        return "{0.tb_index}:{0.type_code}.{0.raiseImmediately}.{1}.{2}"\
+            .format(self, "Y" if self.printed else "N", raised)
 
 
 def _log_verification(msg, log_level):
@@ -150,7 +161,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
 
     def warning_init():
         _debug_print("WARNING (fail_condition)", DEBUG_VERIFY)
-        info = ResultInfo(type="W", printed="-", raise_immediately="N")
+        info = ResultInfo("W", "N")
         status = "WARNING"
         exc_type = WarningException
         try:
@@ -160,7 +171,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
         return info, status, exc_type, tb
 
     def failure_init():
-        info = ResultInfo(type="F", printed="-", raise_immediately="N")
+        info = ResultInfo("F", "N")
         status = "FAIL"
         exc_type = VerificationException
         try:
@@ -170,7 +181,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
         return info, status, exc_type, tb
 
     def pass_init():
-        info = ResultInfo(type="P", printed="-", raise_immediately="-")
+        info = ResultInfo("P", "-")
         status = "PASS"
         tb = None
         exc_type = None
@@ -277,29 +288,27 @@ def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
     stack = inspect.stack()
     depth = 3
 
-    source_call, source_locals, func_call_complete = \
+    r = result_info
+    r.source_call, r.source_locals, r.source_function = \
         _get_calling_func(stack, depth, True, full_method_trace)
-    tb_depth_1 = [source_call, source_locals]
-    tb_depth_1.extend(func_call_complete)
+    tb_depth_1 = [r.source_call, r.source_locals]
+    tb_depth_1.extend(r.source_function)
 
     depth += 1
-    trace_complete = ""
-
-    if result_info.type == "F" or result_info.type == "W":
+    s_res = Verifications.saved_results
+    if result_info.type_code == "F" or result_info.type_code == "W":
         trace_complete = _get_complete_traceback(stack, depth, stop_at_test,
                                                  full_method_trace,
                                                  tb=tb_depth_1)
 
-    s_res = Verifications.saved_results
-    s_tb = Verifications.saved_tracebacks
-    s_tb.append({"type": exc_type,
-                 'tb': tb,  # exc_info
-                 'complete': trace_complete,
-                 "source_function": func_call_complete,
-                 "source_call": source_call,
-                 "source_locals": source_locals,
-                 'raised': False})
-    result_info.tbIndex = len(Verifications.saved_tracebacks) - 1
+        s_tb = Verifications.saved_tracebacks
+        s_tb.append({"type": exc_type,
+                     'tb': tb,
+                     'complete': trace_complete,
+                     'raised': False,
+                     "res_index": len(s_res)})
+        result_info.tb_index = len(s_tb) - 1
+
     s_res.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
                               ('Message', msg),
                               ('Status', status),
@@ -363,7 +372,7 @@ def print_saved_results(column_key_order="Step", extra_info=False):
 
 def _print_result(result, key_val_lengths, column_key_order, extra_info):
     # Print a table row for a single saved result.
-    if not DEBUG_PRINT_SAVED and result["Debug"].printed == "Y":
+    if not DEBUG_PRINT_SAVED and result["Debug"].printed:
         return
     line = ""
     for key in column_key_order:
