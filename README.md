@@ -139,4 +139,4 @@ A check is required to ensure any exceptions from previous tests are not re-rais
 * Save any exceptions other than VerificationException and WarningExceptions that are caught at the end of the call phase.
 * When re-raising saved results at the end of the test always raise any failures before raising a saved warning
 (even if warning was initially raised first).
-* Add ability to differentiate between the results fo the test phases (setup, call, teardown).
+* Add ability to differentiate between the results of the test phases (setup, call, teardown).
