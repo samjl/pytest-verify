@@ -12,18 +12,18 @@ def test_full_traceback():
     log.detail_step("Ensure default behaviour is short trace back")
     x = False
     verify(x is True, "Check x is true (fails - call line tb)",
-           raise_assertion=False)
+           raise_immediately=False)
 
     log.detail_step("Test no change when full_method_trace is set to False")
     x = False
     verify(x is True, "Check x is true (fails - call line tb)",
-           raise_assertion=False, full_method_trace=False)
+           raise_immediately=False, full_method_trace=False)
 
     log.detail_step("Test full function traceback is printed when "
                     "full_method_trace is set to True")
     x = False
     verify(x is True, "Check x is true (fails - full func tb)",
-           raise_assertion=False, full_method_trace=True)
+           raise_immediately=False, full_method_trace=True)
 
     log.detail_step("Test a function call as fail condition (fails)")
 
@@ -31,14 +31,14 @@ def test_full_traceback():
         return it is True
     y = False
     verify(is_it_true(y), "test y is True (fail condition in function)",
-           raise_assertion=False, full_method_trace=True)
+           raise_immediately=False, full_method_trace=True)
 
     log.detail_step("Check traceback to call to verify over multiple stack "
                     "levels")
 
     def stack_l3(k):
         print "Finally verifying x, j, k"
-        verify(k is True, "test k is True (fail)", raise_assertion=False,
+        verify(k is True, "test k is True (fail)", raise_immediately=False,
                full_method_trace=True)
 
     def stack_l2(j):
@@ -54,7 +54,7 @@ def test_full_traceback():
 
     log.detail_step("Test traceback depth past test function (into pytest "
                     "source)")
-    verify(x is True, "Check x is true (fail)", raise_assertion=False,
+    verify(x is True, "Check x is true (fail)", raise_immediately=False,
            full_method_trace=True, stop_at_test=False)
 
     log.detail_step("End of test_full_traceback")

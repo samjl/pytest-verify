@@ -27,7 +27,7 @@ Note: pytest-loglevels will be installed automatically with pytest-verify.
 
 Function call format
 ```python
-verify(fail_condition, fail_message, raise_assertion=True,
+verify(fail_condition, fail_message, raise_immediately=True,
        warning=False, warn_condition=None, warn_message=None,
        full_method_trace=False, stop_at_test=True, log_level=None)
 ```
@@ -38,8 +38,8 @@ an expression that if it evaluates to False raises a VerificationException
 (or WarningException is warning is set to True).
 * fail_message:
 a message describing the verification being performed (requires fail_condition to be defined).
-* raise_assertion (optional, default True):
-whether to raise an assertion immediately upon failure (same behaviour as regular assert).
+* raise_immediately (optional, default True):
+whether to raise an exception immediately upon failure (same behaviour as regular assert).
 * warning (optional, default None):
 raise the fail_condition as a WarningException rather than VerificationException.
 
@@ -69,19 +69,19 @@ from pytest import log, verify
 ```
 
 Basic use in place of a regular assert statement. Behaviour is identical to assert,
-the assertion is raised immediately and the test is torn down and ended.
+the exception is raised immediately and the test is torn down and ended.
 ```python
     # expected to pass:
     x = True
     verify(x is True, "Check something is true (passes)")
-    # expected to fail immediately and raise assertion:
+    # expected to fail immediately and raise exception:
     y = False
     verify(y is True, "Check something is true (fails)")
 ```
 
 Save but do not raise failed verification:
 ```python
-    verify(y is True, "Check something is true (fails)", raise_assertion=False)
+    verify(y is True, "Check something is true (fails)", raise_immediately=False)
 ```
 
 ## Raising Warnings

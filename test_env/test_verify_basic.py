@@ -11,7 +11,7 @@ def test_verify_basic_usage():
 
     log.detail_step("Test a verification that fails")
     x = False
-    verify(x is True, "test x is True (fail)", raise_assertion=False)
+    verify(x is True, "test x is True (fail)", raise_immediately=False)
 
     log.detail_step("Test a function call as fail condition")
 
@@ -19,7 +19,7 @@ def test_verify_basic_usage():
         return it is True
     y = True
     verify(is_it_true(y), "test y is True (fail condition in function)",
-           raise_assertion=False)
+           raise_immediately=False)
 
     log.detail_step("Test a verification that warns")
     x = False

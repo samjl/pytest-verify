@@ -78,11 +78,11 @@ def pytest_terminal_summary(terminalreporter):
 
 def pytest_namespace():
     # Add verify functions to the pytest namespace
-    def verify(fail_condition, fail_message, raise_assertion=True,
+    def verify(fail_condition, fail_message, raise_immediately=True,
                warning=False, warn_condition=None, warn_message=None,
                full_method_trace=False, stop_at_test=True, log_level=None):
         """Print a message at the highest log level."""
-        _verify(fail_condition, fail_message, raise_assertion,
+        _verify(fail_condition, fail_message, raise_immediately,
                 warning, warn_condition, warn_message,
                 full_method_trace, stop_at_test, log_level)
 
@@ -111,10 +111,7 @@ class ResultInfo:
         # "P": pass, "W": WarningException, "F": VerificationException
         # "A": AssertionError, "O": any Other exception
         self.type_code = type_code
-        # Was raise_assertion set?
-        # "Y": Yes, "N": No, "-": N/A (for passed results)
-        self.raiseImmediately = raise_immediately
-
+        self.raise_immediately = raise_immediately
         self.printed = False
         self.tb_index = "-"
         self.source_function = None
@@ -130,8 +127,9 @@ class ResultInfo:
                 raised = "N"
         else:
             raised = "-"
-        return "{0.tb_index}:{0.type_code}.{0.raiseImmediately}.{1}.{2}"\
-            .format(self, "Y" if self.printed else "N", raised)
+        return "{0.tb_index}:{0.type_code}.{1}.{2}.{3}"\
+            .format(self, "Y" if self.raise_immediately else "N",
+                    "Y" if self.printed else "N", raised)
 
 
 def _log_verification(msg, log_level):
@@ -146,14 +144,14 @@ def _log_verification(msg, log_level):
     pytest.redirect.set_level(log_level_restore)
 
 
-def _verify(fail_condition, fail_message, raise_assertion, warning,
+def _verify(fail_condition, fail_message, raise_immediately, warning,
             warn_condition, warn_message, full_method_trace,
             stop_at_test, log_level):
     """Perform a verification of a given condition using the parameters
     provided.
     """
     if warning:
-        raise_assertion = False
+        raise_immediately = False
 
     _debug_print("'*** PERFORMING VERIFICATION ***", DEBUG_VERIFY)
     _debug_print("LOCALS: {}".format(inspect.getargvalues(inspect.stack()[1][0]).locals),
@@ -161,7 +159,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
 
     def warning_init():
         _debug_print("WARNING (fail_condition)", DEBUG_VERIFY)
-        info = ResultInfo("W", "N")
+        info = ResultInfo("W", raise_immediately)
         status = "WARNING"
         exc_type = WarningException
         try:
@@ -171,7 +169,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
         return info, status, exc_type, tb
 
     def failure_init():
-        info = ResultInfo("F", "N")
+        info = ResultInfo("F", raise_immediately)
         status = "FAIL"
         exc_type = VerificationException
         try:
@@ -181,7 +179,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
         return info, status, exc_type, tb
 
     def pass_init():
-        info = ResultInfo("P", "-")
+        info = ResultInfo("P", raise_immediately)
         status = "PASS"
         tb = None
         exc_type = None
@@ -210,7 +208,7 @@ def _verify(fail_condition, fail_message, raise_assertion, warning,
     _save_result(info, msg, status, tb, exc_type, stop_at_test,
                  full_method_trace)
 
-    if not fail_condition and raise_assertion:
+    if not fail_condition and raise_immediately:
         # Raise immediately
         raise_(exc_type, msg, tb)
     return True
