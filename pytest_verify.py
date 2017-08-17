@@ -2,12 +2,16 @@ import inspect
 import pytest
 import re
 import sys
+import traceback
 from collections import OrderedDict
 from future.utils import raise_
 
 MAX_TRACEBACK_DEPTH = 20
 DEBUG_PRINT_SAVED = False
 DEBUG_VERIFY = False
+INCLUDE_VERIFY_LOCALS = True
+INCLUDE_OTHER_LOCALS = True
+STOP_AT_TEST_DEFAULT = True
 
 
 class WarningException(Exception):
@@ -30,7 +34,62 @@ def pytest_pyfunc_call(pyfuncitem):
     print "Caught exception: {}".format(raised_exc)
     if raised_exc:
         if raised_exc[0] not in (WarningException, VerificationException):
-            raise_(*raised_exc)
+            exc_type = "{}".format(str(raised_exc[0].__name__)[0])
+            exc_msg = str(raised_exc[1]).strip().replace("\n", " ")
+            result_info = ResultInfo(exc_type, True)
+
+            stack_trace = traceback.extract_tb(raised_exc[2])
+            # stack_trace is a list of stack trace tuples for each
+            # stack depth (filename, line number, function name*, text)
+            # "text" only gets the first line of a call multi-line call
+            # stack trace is None if source not available.
+            trace_complete = []
+            for tb_level in reversed(stack_trace):
+                if STOP_AT_TEST_DEFAULT and _trace_end_detected(tb_level[3].strip()):
+                    break
+                trace_complete.insert(0, ">   {0[3]}".format(tb_level))
+
+                # Printing all locals in a stack trace can easily lead to
+                # problems just due to errored output. That's why it is not
+                # implemented in general in Python. Probably okay for
+                # controlled purposes like verify traceback to test
+                # function and no further.
+                # TODO Could possibly truncate the locals?
+                # source_locals = ""
+                if INCLUDE_OTHER_LOCALS:
+                    frame = raised_exc[2]
+                    tb_locals = []
+                    frame = frame.tb_next
+                    while frame:
+                        tb_locals.append(frame.tb_frame.f_locals)
+                        frame = frame.tb_next
+                    trace_complete.insert(0, (", ".join("{}: {}".format(str(k).
+                        replace("\n", " "), str(v).replace("\n", " "))
+                        for k, v in tb_locals[-1]. iteritems())))
+
+                trace_complete.insert(0, "{0[0]}:{0[1]}:{0[2]}".format(tb_level))
+
+            source_locals = ""
+            if INCLUDE_OTHER_LOCALS:
+                source_locals = trace_complete[-3]
+
+            s_res = Verifications.saved_results
+            s_tb = Verifications.saved_tracebacks
+            s_tb.append({"type": raised_exc[0],
+                         'tb': raised_exc[2],
+                         'complete': trace_complete,
+                         'raised': False,
+                         "res_index": len(s_res)})
+            result_info.tb_index = len(s_tb) - 1
+            result_info.source_call = [trace_complete[-1]]
+            result_info.source_locals = source_locals
+            result_info.source_function = trace_complete[-2]
+            s_res.append(OrderedDict([('Step', pytest.redirect.
+                                       get_current_l1_msg()),
+                                      ('Message', exc_msg),
+                                      ('Status', "FAIL"),
+                                      ('Extra Info', result_info)]))
+            raise_(*raised_exc)  # Re-raise the assertion
 
     # Re-raise caught exceptions
     for i, saved_traceback in enumerate(Verifications.saved_tracebacks):
@@ -59,15 +118,16 @@ def pytest_terminal_summary(terminalreporter):
     for saved_res in saved_results:
         pytest.log.step(saved_res)
         pytest.log.step(saved_res["Extra Info"].format_result_info())
-        pytest.log.step(saved_res["Extra Info"].source_call)
-        pytest.log.step(saved_res["Extra Info"].source_locals)
-        for line in saved_res["Extra Info"].source_function:
+        pytest.log.step(saved_res["Extra Info"].source_function)
+        if saved_res["Extra Info"].source_locals:
+            pytest.log.step(saved_res["Extra Info"].source_locals)
+        for line in saved_res["Extra Info"].source_call:
             pytest.log.step(line)
 
     saved_tracebacks = Verifications.saved_tracebacks
     pytest.log.high_level_step("Saved tracebacks")
     for i, saved_tb in enumerate(saved_tracebacks):
-        print saved_tb
+        pytest.log.step(saved_tb)
         for line in saved_tb["complete"]:
             pytest.log.step(line)
         exc_type = saved_tb["type"]
@@ -228,9 +288,11 @@ def _get_complete_traceback(stack, start_depth, stop_at_test,
         calling_func = _get_calling_func(stack, depth, stop_at_test,
                                          full_method_trace)
         if calling_func:
-            source_call, source_locals, func_call_complete = calling_func
-            tb_new = [source_call, source_locals]
-            tb_new.extend(func_call_complete)
+            source_function, source_locals, source_call = calling_func
+            tb_new = [source_function]
+            if source_locals:
+                tb_new.append(source_locals)
+            tb_new.extend(source_call)
             tb[0:0] = tb_new
         else:
             break
@@ -239,7 +301,6 @@ def _get_complete_traceback(stack, start_depth, stop_at_test,
 
 def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
     calling_source = []
-    stop_keywords = ("runTest", "testfunction", "fixturefunc")
     try:
         func_source = inspect.getsourcelines(stack[depth][0])
     except Exception:
@@ -247,12 +308,19 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
     else:
         func_line_number = func_source[1]
         func_call_source_line = "{0[4][0]}".format(stack[depth])
-        if stop_at_test and any(item in func_call_source_line.strip() for item in stop_keywords):
+        if stop_at_test and _trace_end_detected(func_call_source_line.strip()):
             return
         call_line_number = stack[depth][2]
-        module_line_parent = "{0[1]}:{0[2]}:{0[3]}".format(stack[depth])  # []
-        calling_frame_locals = (", ".join("{}: {}".format(k, v)
-                                for k, v in inspect.getargvalues(stack[depth][0]).locals.items()))
+        module_line_parent = "{0[1]}:{0[2]}:{0[3]}".format(stack[depth])
+        calling_frame_locals = ""
+        if INCLUDE_VERIFY_LOCALS:
+            try:
+                args = inspect.getargvalues(stack[depth][0]).locals.items()
+                calling_frame_locals = (", ".join("{}: {}".format(k, v)
+                                        for k, v in args))
+            except Exception:
+                pytest.log.step("Failed to retrieve local variables for {}".
+                                format(module_line_parent), log_level=5)
         _debug_print("CALL: {}".format(module_line_parent), DEBUG_VERIFY)
         if full_method_trace:
             for lineNumber in range(0, call_line_number - func_line_number):
@@ -269,32 +337,43 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
         return module_line_parent, calling_frame_locals, calling_source
 
 
+def _trace_end_detected(func_call_line):
+    # Check for the stop keywords in the function call source line
+    # (traceback). Returns True if keyword found and traceback is
+    # complete, False otherwise.
+    stop_keywords = ("runTest", "testfunction", "fixturefunc")
+    return any(item in func_call_line for item in stop_keywords)
+
+
 def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
                  full_method_trace):
     """Save a result of verify/_verify.
     Items to save:
     Saved result - Step,
                    Message,
-                   Extra Info
-    Traceback - tb(?),
+                   Status,
+                   Extra Info (instance of ResultInfo)
+    Traceback - type,
+                tb,
                 complete,
-                source_function, (move to saved_results?)
-                source_call,
-                source_locals,
-                raised (also in debug?)
+                raised,
+                res_index
     """
     stack = inspect.stack()
     depth = 3
 
     r = result_info
-    r.source_call, r.source_locals, r.source_function = \
+    r.source_function, r.source_locals, r.source_call = \
         _get_calling_func(stack, depth, True, full_method_trace)
-    tb_depth_1 = [r.source_call, r.source_locals]
-    tb_depth_1.extend(r.source_function)
+    tb_depth_1 = [r.source_function]
+    if r.source_locals:
+        tb_depth_1.append(r.source_locals)
+    tb_depth_1.extend(r.source_call)
 
     depth += 1
     s_res = Verifications.saved_results
     if result_info.type_code == "F" or result_info.type_code == "W":
+        # Types processed by this function are "P", "F" and "W"
         trace_complete = _get_complete_traceback(stack, depth, stop_at_test,
                                                  full_method_trace,
                                                  tb=tb_depth_1)
