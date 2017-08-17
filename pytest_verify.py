@@ -73,7 +73,7 @@ def pytest_terminal_summary(terminalreporter):
         exc_type = saved_tb["type"]
         pytest.log.step("{0}{1[Message]}".format("{}: ".format(
                         exc_type.__name__) if exc_type else "",
-                        Verifications.saved_results[i]))
+                        Verifications.saved_results[saved_tb["res_index"]]))
 
 
 def pytest_namespace():
