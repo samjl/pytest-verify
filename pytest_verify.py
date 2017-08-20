@@ -98,7 +98,7 @@ def pytest_pyfunc_call(pyfuncitem):
                      DEBUG_VERIFY)
         if exc_type:
             msg = "{0[Message]} - {0[Status]}".format(
-                Verifications.saved_results[i])
+                Verifications.saved_results[saved_traceback["res_index"]])
             tb = saved_traceback["tb"]
             print "Re-raising first saved exception: {} {} {}".format(
                 exc_type, msg, tb)
