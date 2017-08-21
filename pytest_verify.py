@@ -78,7 +78,7 @@ def pytest_pyfunc_call(pyfuncitem):
             s_tb.append({"type": raised_exc[0],
                          'tb': raised_exc[2],
                          'complete': trace_complete,
-                         'raised': False,
+                         'raised': True,
                          "res_index": len(s_res)})
             result_info.tb_index = len(s_tb) - 1
             result_info.source_call = [trace_complete[-1]]
@@ -89,6 +89,7 @@ def pytest_pyfunc_call(pyfuncitem):
                                       ('Message', exc_msg),
                                       ('Status', "FAIL"),
                                       ('Extra Info', result_info)]))
+            _set_saved_raised()
             raise_(*raised_exc)  # Re-raise the assertion
 
     # Re-raise caught exceptions
@@ -102,7 +103,9 @@ def pytest_pyfunc_call(pyfuncitem):
             tb = saved_traceback["tb"]
             print "Re-raising first saved exception: {} {} {}".format(
                 exc_type, msg, tb)
-            raise_(exc_type, msg, tb)  # for python 2 and 3 compatibility
+            if not saved_traceback["raised"]:
+                _set_saved_raised()
+                raise_(exc_type, msg, tb)  # for python 2 and 3 compatibility
 
 
 def pytest_terminal_summary(terminalreporter):
@@ -390,6 +393,13 @@ def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
                               ('Message', msg),
                               ('Status', status),
                               ('Extra Info', result_info)]))
+
+
+def _set_saved_raised():
+    # Set saved traceback as raised so they are not subsequently raised
+    # again.
+    for saved_traceback in Verifications.saved_tracebacks:
+        saved_traceback["raised"] = True
 
 
 def _get_call_source(func_source, func_call_source_line, call_line_number,
