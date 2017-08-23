@@ -12,6 +12,8 @@ DEBUG_VERIFY = False
 INCLUDE_VERIFY_LOCALS = True
 INCLUDE_OTHER_LOCALS = True
 STOP_AT_TEST_DEFAULT = True
+RAISE_WARNINGS = True  # Choose whether to raise warnings or just report
+# them in the test summary
 
 
 class WarningException(Exception):
@@ -34,78 +36,91 @@ def pytest_pyfunc_call(pyfuncitem):
     print "Caught exception: {}".format(raised_exc)
     if raised_exc:
         if raised_exc[0] not in (WarningException, VerificationException):
-            exc_type = "{}".format(str(raised_exc[0].__name__)[0])
-            exc_msg = str(raised_exc[1]).strip().replace("\n", " ")
-            result_info = ResultInfo(exc_type, True)
+            # For exceptions other than Warning and Verifications:
+            # save the exceptions details and traceback so they are
+            # printed in the final test summary,
+            # re-raise the exception
+            _save_and_raise_non_verify_exc(raised_exc)
 
-            stack_trace = traceback.extract_tb(raised_exc[2])
-            # stack_trace is a list of stack trace tuples for each
-            # stack depth (filename, line number, function name*, text)
-            # "text" only gets the first line of a call multi-line call
-            # stack trace is None if source not available.
-            trace_complete = []
-            for tb_level in reversed(stack_trace):
-                if STOP_AT_TEST_DEFAULT and _trace_end_detected(tb_level[3].strip()):
-                    break
-                trace_complete.insert(0, ">   {0[3]}".format(tb_level))
+    # Re-raise first VerificationException not yet raised
+    # Saved and immediately raised VerificationExceptions are raised here.
+    _raise_first_saved_exc_type(VerificationException)
+    # Else re-raise first WarningException not yet raised
+    if RAISE_WARNINGS:
+        _raise_first_saved_exc_type(WarningException)
 
-                # Printing all locals in a stack trace can easily lead to
-                # problems just due to errored output. That's why it is not
-                # implemented in general in Python. Probably okay for
-                # controlled purposes like verify traceback to test
-                # function and no further.
-                # TODO Could possibly truncate the locals?
-                # source_locals = ""
-                if INCLUDE_OTHER_LOCALS:
-                    frame = raised_exc[2]
-                    tb_locals = []
-                    frame = frame.tb_next
-                    while frame:
-                        tb_locals.append(frame.tb_frame.f_locals)
-                        frame = frame.tb_next
-                    trace_complete.insert(0, (", ".join("{}: {}".format(str(k).
-                        replace("\n", " "), str(v).replace("\n", " "))
-                        for k, v in tb_locals[-1]. iteritems())))
 
-                trace_complete.insert(0, "{0[0]}:{0[1]}:{0[2]}".format(tb_level))
+def _save_and_raise_non_verify_exc(raised_exc):
+    exc_type = "{}".format(str(raised_exc[0].__name__)[0])
+    exc_msg = str(raised_exc[1]).strip().replace("\n", " ")
+    result_info = ResultInfo(exc_type, True)
 
-            source_locals = ""
-            if INCLUDE_OTHER_LOCALS:
-                source_locals = trace_complete[-3]
+    stack_trace = traceback.extract_tb(raised_exc[2])
+    # stack_trace is a list of stack trace tuples for each
+    # stack depth (filename, line number, function name*, text)
+    # "text" only gets the first line of a call multi-line call
+    # stack trace is None if source not available.
+    trace_complete = []
+    for tb_level in reversed(stack_trace):
+        if STOP_AT_TEST_DEFAULT and _trace_end_detected(tb_level[3].strip()):
+            break
+        trace_complete.insert(0, ">   {0[3]}".format(tb_level))
 
-            s_res = Verifications.saved_results
-            s_tb = Verifications.saved_tracebacks
-            s_tb.append({"type": raised_exc[0],
-                         'tb': raised_exc[2],
-                         'complete': trace_complete,
-                         'raised': True,
-                         "res_index": len(s_res)})
-            result_info.tb_index = len(s_tb) - 1
-            result_info.source_call = [trace_complete[-1]]
-            result_info.source_locals = source_locals
-            result_info.source_function = trace_complete[-2]
-            s_res.append(OrderedDict([('Step', pytest.redirect.
-                                       get_current_l1_msg()),
-                                      ('Message', exc_msg),
-                                      ('Status', "FAIL"),
-                                      ('Extra Info', result_info)]))
-            _set_saved_raised()
-            raise_(*raised_exc)  # Re-raise the assertion
+        # Printing all locals in a stack trace can easily lead to
+        # problems just due to errored output. That's why it is not
+        # implemented in general in Python. Probably okay for
+        # controlled purposes like verify traceback to test
+        # function and no further.
+        if INCLUDE_OTHER_LOCALS:
+            frame = raised_exc[2]
+            tb_locals = []
+            frame = frame.tb_next
+            while frame:
+                tb_locals.append(frame.tb_frame.f_locals)
+                frame = frame.tb_next
+            trace_complete.insert(0, (", ".join("{}: {}".format(str(k).
+                replace("\n", " "), str(v).replace("\n", " "))
+                for k, v in tb_locals[-1]. iteritems())))
 
-    # Re-raise caught exceptions
+        trace_complete.insert(0, "{0[0]}:{0[1]}:{0[2]}".format(tb_level))
+
+    source_locals = ""
+    if INCLUDE_OTHER_LOCALS:
+        source_locals = trace_complete[-3]
+
+    s_res = Verifications.saved_results
+    s_tb = Verifications.saved_tracebacks
+    s_tb.append({"type": raised_exc[0],
+                 'tb': raised_exc[2],
+                 'complete': trace_complete,
+                 'raised': True,
+                 "res_index": len(s_res)})
+    result_info.tb_index = len(s_tb) - 1
+    result_info.source_call = [trace_complete[-1]]
+    result_info.source_locals = source_locals
+    result_info.source_function = trace_complete[-2]
+    s_res.append(OrderedDict([('Step', pytest.redirect.
+                               get_current_l1_msg()),
+                              ('Message', exc_msg),
+                              ('Status', "FAIL"),
+                              ('Extra Info', result_info)]))
+    _set_saved_raised()
+    raise_(*raised_exc)  # Re-raise the assertion
+
+
+def _raise_first_saved_exc_type(type_to_raise):
     for i, saved_traceback in enumerate(Verifications.saved_tracebacks):
         exc_type = saved_traceback["type"]
         _debug_print("saved traceback index: {}, type: {}".format(i, exc_type),
                      DEBUG_VERIFY)
-        if exc_type:
+        if exc_type == type_to_raise and not saved_traceback["raised"]:
             msg = "{0[Message]} - {0[Status]}".format(
                 Verifications.saved_results[saved_traceback["res_index"]])
             tb = saved_traceback["tb"]
-            print "Re-raising first saved exception: {} {} {}".format(
-                exc_type, msg, tb)
-            if not saved_traceback["raised"]:
-                _set_saved_raised()
-                raise_(exc_type, msg, tb)  # for python 2 and 3 compatibility
+            print "Re-raising first saved {}: {} {} {}".\
+                format(type_to_raise, exc_type, msg, tb)
+            _set_saved_raised()
+            raise_(exc_type, msg, tb)  # for python 2 and 3 compatibility
 
 
 def pytest_terminal_summary(terminalreporter):
