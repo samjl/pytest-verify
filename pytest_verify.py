@@ -9,6 +9,7 @@ from future.utils import raise_
 MAX_TRACEBACK_DEPTH = 20
 DEBUG_PRINT_SAVED = False
 DEBUG_VERIFY = False
+DEBUG_PHASES = True
 INCLUDE_VERIFY_LOCALS = True
 INCLUDE_OTHER_LOCALS = True
 STOP_AT_TEST_DEFAULT = True
@@ -25,15 +26,29 @@ class VerificationException(Exception):
 
 
 @pytest.hookimpl(hookwrapper=True)
-def pytest_pyfunc_call(pyfuncitem):
-    _debug_print("CALL (test) - Starting test {}".format(pyfuncitem),
-                 DEBUG_VERIFY)
+def pytest_runtest_setup(item):
+    _debug_print("SETUP - Starting {}".format(item), DEBUG_PHASES)
+    SessionStatus.run_order.append(item.name)  # Save the run order
+    SessionStatus.phase = "S"  # (S)etup phase
     outcome = yield
-    _debug_print("CALL (test) - Completed test {}, outcome {}".
-                 format(pyfuncitem, outcome), DEBUG_VERIFY)
+    _debug_print("SETUP - Complete {}, outcome: {}".format(item, outcome),
+                 DEBUG_PHASES)
+
+    raised_exc = outcome.excinfo
+    _debug_print("SETUP - Raised exception: {}".format(raised_exc),
+                 DEBUG_PHASES)
+    SessionStatus.phase = "C"  # (C)all phase
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_pyfunc_call(pyfuncitem):
+    _debug_print("CALL - Starting {}".format(pyfuncitem), DEBUG_VERIFY)
+    outcome = yield
+    _debug_print("CALL - Completed {}, outcome {}".format(pyfuncitem, outcome),
+                 DEBUG_VERIFY)
     # outcome.excinfo may be None or a (cls, val, tb) tuple
     raised_exc = outcome.excinfo
-    print "Caught exception: {}".format(raised_exc)
+    print "CALL - Caught exception: {}".format(raised_exc)
     if raised_exc:
         if raised_exc[0] not in (WarningException, VerificationException):
             # For exceptions other than Warning and Verifications:
@@ -48,6 +63,19 @@ def pytest_pyfunc_call(pyfuncitem):
     # Else re-raise first WarningException not yet raised
     if RAISE_WARNINGS:
         _raise_first_saved_exc_type(WarningException)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_teardown(item, nextitem):
+    _debug_print("TEARDOWN - Starting {}".format(item), DEBUG_PHASES)
+    SessionStatus.phase = "T"  # (T)eardown phase
+    outcome = yield
+    _debug_print("TEARDOWN - completed {}, outcome: {}".format(item, outcome),
+                 DEBUG_PHASES)
+
+    raised_exc = outcome.excinfo
+    _debug_print("TEARDOWN - Raised exception: {}".format(raised_exc),
+                 DEBUG_PHASES)
 
 
 def _save_and_raise_non_verify_exc(raised_exc):
@@ -99,8 +127,7 @@ def _save_and_raise_non_verify_exc(raised_exc):
     result_info.source_call = [trace_complete[-1]]
     result_info.source_locals = source_locals
     result_info.source_function = trace_complete[-2]
-    s_res.append(OrderedDict([('Step', pytest.redirect.
-                               get_current_l1_msg()),
+    s_res.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
                               ('Message', exc_msg),
                               ('Status', "FAIL"),
                               ('Extra Info', result_info)]))
@@ -181,6 +208,13 @@ class Verifications:
     saved_results = []
 
 
+class SessionStatus:
+    # Track the session status
+    phase = None  # Current test phase. Possible phases: S(etup),
+    # C(all), T(eardown)
+    run_order = []  # Test function execution order
+
+
 class ResultInfo:
     # Instances of ResultInfo used to store information on every
     # verification (originating from the verify function) performed.
@@ -195,6 +229,7 @@ class ResultInfo:
         self.source_function = None
         self.source_call = None
         self.source_locals = None
+        self.phase = SessionStatus.phase
 
     def format_result_info(self):
         # Format the result to a human readable string.
@@ -205,7 +240,7 @@ class ResultInfo:
                 raised = "N"
         else:
             raised = "-"
-        return "{0.tb_index}:{0.type_code}.{1}.{2}.{3}"\
+        return "{0.tb_index}:{0.type_code}.{0.phase}.{1}.{2}.{3}"\
             .format(self, "Y" if self.raise_immediately else "N",
                     "Y" if self.printed else "N", raised)
 
