@@ -296,11 +296,18 @@ class ResultInfo:
                 raised = "N"
         else:
             raised = "-"
-        return "{0.tb_index}:{0.type_code}.{0.phase}.{1}.{2}.{3}." \
-               "{0.active_scopes}".format(self, "Y" if self.raise_immediately
-                                          else "N", "Y" if self.printed else
-                                          "N", raised)
+        return "{0.tb_index}:{0.type_code}.{1}.{2}.{3}.({4}:{0.phase})". \
+            format(self, "Y" if self.raise_immediately else "N",
+                   "Y" if self.printed else "N", raised,
+                   ",".join(self.active_func_order()))
 
+    def active_func_order(self):
+        active_scopes = json.loads(self.active_scopes)
+        func_order = []
+        for scope in ("S", "M", "C", "F"):
+            if active_scopes[scope]:
+                func_order.extend(active_scopes[scope])
+        return func_order
 
 def _log_verification(msg, log_level):
     # Log the verification result.
