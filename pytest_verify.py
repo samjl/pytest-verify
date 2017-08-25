@@ -19,12 +19,7 @@ STOP_AT_TEST_DEFAULT = True
 RAISE_WARNINGS = True  # Choose whether to raise warnings or just report
 # them in the test summary
 
-SCOPES = {
-    "session": "S",
-    "class": "C",
-    "module": "M",
-    "function": "F"
-}
+SCOPE_ORDER = ("session", "class", "module", "function")
 
 
 class WarningException(Exception):
@@ -39,7 +34,7 @@ class VerificationException(Exception):
 def pytest_runtest_setup(item):
     _debug_print("SETUP - Starting {}".format(item), DEBUG_PHASES)
     SessionStatus.run_order.append(item.name)  # Save the run order
-    SessionStatus.phase = "S"  # (S)etup phase
+    SessionStatus.phase = "setup"
     outcome = yield
     _debug_print("SETUP - Complete {}, outcome: {}".format(item, outcome),
                  DEBUG_PHASES)
@@ -47,7 +42,7 @@ def pytest_runtest_setup(item):
     raised_exc = outcome.excinfo
     _debug_print("SETUP - Raised exception: {}".format(raised_exc),
                  DEBUG_PHASES)
-    SessionStatus.phase = "C"  # (C)all phase
+    SessionStatus.phase = "call"
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -78,7 +73,7 @@ def pytest_pyfunc_call(pyfuncitem):
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):
     _debug_print("TEARDOWN - Starting {}".format(item), DEBUG_PHASES)
-    SessionStatus.phase = "T"  # (T)eardown phase
+    SessionStatus.phase = "teardown"
     outcome = yield
     _debug_print("TEARDOWN - completed {}, outcome: {}".format(item, outcome),
                  DEBUG_PHASES)
@@ -216,7 +211,7 @@ def pytest_namespace():
                     _debug_print("Set scope wrapper finalizer",
                                  DEBUG_SCOPES)
 
-                SessionStatus.scopes[SCOPES[request.scope]].append(
+                SessionStatus.scopes[request.scope].append(
                     request.fixturename)
                 try:
                     func(*args, **kwargs)
@@ -235,8 +230,8 @@ def pytest_namespace():
 
                 def fin():  # not executed if teardown raises exception
                     _debug_print("Clear scope wrapper finalizer", DEBUG_SCOPES)
-                    SessionStatus.scopes[SCOPES[request.scope]].pop(
-                        SessionStatus.scopes[SCOPES[request.scope]].index(
+                    SessionStatus.scopes[request.scope].pop(
+                        SessionStatus.scopes[request.scope].index(
                             request.fixturename))
                 try:
                     func(*args, **kwargs)
@@ -267,7 +262,7 @@ class SessionStatus:
     phase = None  # Current test phase. Possible phases: S(etup),
     # C(all), T(eardown)
     run_order = []  # Test function execution order
-    scopes = {"S": [], "M": [], "C": [], "F": []}
+    scopes = {"session": [], "module": [], "class": [], "function": []}
 
 
 class ResultInfo:
@@ -302,9 +297,12 @@ class ResultInfo:
                    ",".join(self.active_func_order()))
 
     def active_func_order(self):
+        # Create a list of all the active setup functions in the order
+        # they were executed.
+        _debug_print(self.active_scopes, DEBUG_SCOPES)
         active_scopes = json.loads(self.active_scopes)
         func_order = []
-        for scope in ("S", "M", "C", "F"):
+        for scope in SCOPE_ORDER:
             if active_scopes[scope]:
                 func_order.extend(active_scopes[scope])
         return func_order
