@@ -1,4 +1,6 @@
+import decorator
 import inspect
+import json
 import pytest
 import re
 import sys
@@ -10,11 +12,19 @@ MAX_TRACEBACK_DEPTH = 20
 DEBUG_PRINT_SAVED = False
 DEBUG_VERIFY = False
 DEBUG_PHASES = True
+DEBUG_SCOPES = True
 INCLUDE_VERIFY_LOCALS = True
 INCLUDE_OTHER_LOCALS = True
 STOP_AT_TEST_DEFAULT = True
 RAISE_WARNINGS = True  # Choose whether to raise warnings or just report
 # them in the test summary
+
+SCOPES = {
+    "session": "S",
+    "class": "C",
+    "module": "M",
+    "function": "F"
+}
 
 
 class WarningException(Exception):
@@ -153,6 +163,7 @@ def _raise_first_saved_exc_type(type_to_raise):
 def pytest_terminal_summary(terminalreporter):
     """ override the terminal summary reporting. """
     print "In pytest_terminal_summary"
+    print "Run order: {}".format(", ".join(SessionStatus.run_order))
 
     # Retrieve the saved results and traceback info for any failed
     # verifications.
@@ -196,8 +207,51 @@ def pytest_namespace():
         """
         return Verifications.saved_results, Verifications.saved_tracebacks
 
+    def set_scope(request):
+        def _set_scope(func):
+            def wrapper(func, *args, **kwargs):
+                _debug_print("In set scope wrapper", DEBUG_SCOPES)
+
+                def fin():
+                    _debug_print("Set scope wrapper finalizer",
+                                 DEBUG_SCOPES)
+
+                SessionStatus.scopes[SCOPES[request.scope]].append(
+                    request.fixturename)
+                try:
+                    func(*args, **kwargs)
+                except Exception as e:
+                    _debug_print("Set scope wrapper - exception caught {}".
+                                 format(e), DEBUG_SCOPES)
+                fin()
+                return
+            return decorator.decorator(wrapper, func)
+        return _set_scope
+
+    def clear_scope(request):
+        def _clear_scope(func):
+            def wrapper(func, *args, **kwargs):
+                _debug_print("In clear scope wrapper", DEBUG_SCOPES)
+
+                def fin():  # not executed if teardown raises exception
+                    _debug_print("Clear scope wrapper finalizer", DEBUG_SCOPES)
+                    SessionStatus.scopes[SCOPES[request.scope]].pop(
+                        SessionStatus.scopes[SCOPES[request.scope]].index(
+                            request.fixturename))
+                try:
+                    func(*args, **kwargs)
+                except Exception as e:
+                    _debug_print("Clear scope wrapper - exception caught {}".
+                                 format(e), DEBUG_SCOPES)
+                fin()
+                return
+            return decorator.decorator(wrapper, func)
+        return _clear_scope
+
     name = {"verify": verify,
-            "get_saved_results": get_saved_results}
+            "get_saved_results": get_saved_results,
+            "set_scope": set_scope,
+            "clear_scope": clear_scope}
     return name
 
 
@@ -213,6 +267,7 @@ class SessionStatus:
     phase = None  # Current test phase. Possible phases: S(etup),
     # C(all), T(eardown)
     run_order = []  # Test function execution order
+    scopes = {"S": [], "M": [], "C": [], "F": []}
 
 
 class ResultInfo:
@@ -230,6 +285,7 @@ class ResultInfo:
         self.source_call = None
         self.source_locals = None
         self.phase = SessionStatus.phase
+        self.active_scopes = json.dumps(SessionStatus.scopes)
 
     def format_result_info(self):
         # Format the result to a human readable string.
@@ -240,9 +296,10 @@ class ResultInfo:
                 raised = "N"
         else:
             raised = "-"
-        return "{0.tb_index}:{0.type_code}.{0.phase}.{1}.{2}.{3}"\
-            .format(self, "Y" if self.raise_immediately else "N",
-                    "Y" if self.printed else "N", raised)
+        return "{0.tb_index}:{0.type_code}.{0.phase}.{1}.{2}.{3}." \
+               "{0.active_scopes}".format(self, "Y" if self.raise_immediately
+                                          else "N", "Y" if self.printed else
+                                          "N", raised)
 
 
 def _log_verification(msg, log_level):
