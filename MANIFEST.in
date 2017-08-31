@@ -1,2 +1,3 @@
 include README.md
+include pytest_verify/config.cfg
 

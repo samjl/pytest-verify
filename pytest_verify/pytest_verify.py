@@ -1,6 +1,9 @@
+import ConfigParser
 import decorator
 import inspect
 import json
+import os
+import pkg_resources
 import pytest
 import re
 import sys
@@ -9,15 +12,30 @@ from collections import OrderedDict
 from future.utils import raise_
 
 MAX_TRACEBACK_DEPTH = 20
-DEBUG_PRINT_SAVED = False
-DEBUG_VERIFY = False
-DEBUG_PHASES = True
-DEBUG_SCOPES = True
-INCLUDE_VERIFY_LOCALS = True
-INCLUDE_OTHER_LOCALS = True
-STOP_AT_TEST_DEFAULT = True
-RAISE_WARNINGS = True  # Choose whether to raise warnings or just report
-# them in the test summary
+
+
+class DebugFunctionality:
+    def __init__(self, name, enabled):
+        self.name = name
+        self.enabled = enabled
+
+
+class ConfigOption:
+    def __init__(self, value_type, value_default):
+        # self.name = name
+        self.value_type = value_type
+        self.value = value_default
+
+DEBUG = {"print_saved": DebugFunctionality("print saved", False),
+         "verify": DebugFunctionality("verify", False),
+         "phases": DebugFunctionality("phases", False),
+         "scopes": DebugFunctionality("scopes", False)}
+
+CONFIG = {"include_verify_local_vars": ConfigOption(bool, True),
+          "include_all_local_vars": ConfigOption(bool, False),
+          "traceback_stops_at_test_functions": ConfigOption(bool, True),
+          "raise_warnings": ConfigOption(bool, True),
+          "maximum_traceback_depth": ConfigOption(int, 20)}
 
 SCOPE_ORDER = ("session", "class", "module", "function")
 
@@ -30,27 +48,51 @@ class VerificationException(Exception):
     pass
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config):
+    # Load user defined configuration from file
+    config_path = pkg_resources.resource_filename('pytest_verify', '')
+    parser = ConfigParser.ConfigParser()
+    parser.read(os.path.join(config_path, "config.cfg"))
+
+    for functionality in DEBUG.keys():
+        try:
+            DEBUG[functionality].enabled = parser.getboolean("debug",
+                                                             functionality)
+        except Exception as e:
+            print e
+
+    for option in CONFIG.keys():
+        try:
+            if CONFIG[option].value_type is int:
+                CONFIG[option].value = parser.getint("general", option)
+            else:
+                CONFIG[option].value = parser.getboolean("general", option)
+        except Exception as e:
+            print e
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_setup(item):
-    _debug_print("SETUP - Starting {}".format(item), DEBUG_PHASES)
+    _debug_print("SETUP - Starting {}".format(item), DEBUG["phases"])
     SessionStatus.run_order.append(item.name)  # Save the run order
     SessionStatus.phase = "setup"
     outcome = yield
     _debug_print("SETUP - Complete {}, outcome: {}".format(item, outcome),
-                 DEBUG_PHASES)
+                 DEBUG["phases"])
 
     raised_exc = outcome.excinfo
     _debug_print("SETUP - Raised exception: {}".format(raised_exc),
-                 DEBUG_PHASES)
+                 DEBUG["phases"])
     SessionStatus.phase = "call"
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_pyfunc_call(pyfuncitem):
-    _debug_print("CALL - Starting {}".format(pyfuncitem), DEBUG_VERIFY)
+    _debug_print("CALL - Starting {}".format(pyfuncitem), DEBUG["verify"])
     outcome = yield
     _debug_print("CALL - Completed {}, outcome {}".format(pyfuncitem, outcome),
-                 DEBUG_VERIFY)
+                 DEBUG["verify"])
     # outcome.excinfo may be None or a (cls, val, tb) tuple
     raised_exc = outcome.excinfo
     print "CALL - Caught exception: {}".format(raised_exc)
@@ -66,21 +108,21 @@ def pytest_pyfunc_call(pyfuncitem):
     # Saved and immediately raised VerificationExceptions are raised here.
     _raise_first_saved_exc_type(VerificationException)
     # Else re-raise first WarningException not yet raised
-    if RAISE_WARNINGS:
+    if CONFIG["raise_warnings"].value:
         _raise_first_saved_exc_type(WarningException)
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):
-    _debug_print("TEARDOWN - Starting {}".format(item), DEBUG_PHASES)
+    _debug_print("TEARDOWN - Starting {}".format(item), DEBUG["phases"])
     SessionStatus.phase = "teardown"
     outcome = yield
     _debug_print("TEARDOWN - completed {}, outcome: {}".format(item, outcome),
-                 DEBUG_PHASES)
+                 DEBUG["phases"])
 
     raised_exc = outcome.excinfo
     _debug_print("TEARDOWN - Raised exception: {}".format(raised_exc),
-                 DEBUG_PHASES)
+                 DEBUG["phases"])
 
 
 def _save_and_raise_non_verify_exc(raised_exc):
@@ -95,7 +137,8 @@ def _save_and_raise_non_verify_exc(raised_exc):
     # stack trace is None if source not available.
     trace_complete = []
     for tb_level in reversed(stack_trace):
-        if STOP_AT_TEST_DEFAULT and _trace_end_detected(tb_level[3].strip()):
+        if CONFIG["traceback_stops_at_test_functions"].value\
+                and _trace_end_detected(tb_level[3].strip()):
             break
         trace_complete.insert(0, ">   {0[3]}".format(tb_level))
 
@@ -104,7 +147,7 @@ def _save_and_raise_non_verify_exc(raised_exc):
         # implemented in general in Python. Probably okay for
         # controlled purposes like verify traceback to test
         # function and no further.
-        if INCLUDE_OTHER_LOCALS:
+        if CONFIG["include_all_local_vars"].value:
             frame = raised_exc[2]
             tb_locals = []
             frame = frame.tb_next
@@ -118,7 +161,7 @@ def _save_and_raise_non_verify_exc(raised_exc):
         trace_complete.insert(0, "{0[0]}:{0[1]}:{0[2]}".format(tb_level))
 
     source_locals = ""
-    if INCLUDE_OTHER_LOCALS:
+    if CONFIG["include_all_local_vars"].value:
         source_locals = trace_complete[-3]
 
     s_res = Verifications.saved_results
@@ -144,7 +187,7 @@ def _raise_first_saved_exc_type(type_to_raise):
     for i, saved_traceback in enumerate(Verifications.saved_tracebacks):
         exc_type = saved_traceback["type"]
         _debug_print("saved traceback index: {}, type: {}".format(i, exc_type),
-                     DEBUG_VERIFY)
+                     DEBUG["verify"])
         if exc_type == type_to_raise and not saved_traceback["raised"]:
             msg = "{0[Message]} - {0[Status]}".format(
                 Verifications.saved_results[saved_traceback["res_index"]])
@@ -205,11 +248,11 @@ def pytest_namespace():
     def set_scope(request):
         def _set_scope(func):
             def wrapper(func, *args, **kwargs):
-                _debug_print("In set scope wrapper", DEBUG_SCOPES)
+                _debug_print("In set scope wrapper", DEBUG["scopes"])
 
                 def fin():
                     _debug_print("Set scope wrapper finalizer",
-                                 DEBUG_SCOPES)
+                                 DEBUG["scopes"])
 
                 SessionStatus.scopes[request.scope].append(
                     request.fixturename)
@@ -217,7 +260,7 @@ def pytest_namespace():
                     func(*args, **kwargs)
                 except Exception as e:
                     _debug_print("Set scope wrapper - exception caught {}".
-                                 format(e), DEBUG_SCOPES)
+                                 format(e), DEBUG["scopes"])
                 fin()
                 return
             return decorator.decorator(wrapper, func)
@@ -226,10 +269,11 @@ def pytest_namespace():
     def clear_scope(request):
         def _clear_scope(func):
             def wrapper(func, *args, **kwargs):
-                _debug_print("In clear scope wrapper", DEBUG_SCOPES)
+                _debug_print("In clear scope wrapper", DEBUG["scopes"])
 
                 def fin():  # not executed if teardown raises exception
-                    _debug_print("Clear scope wrapper finalizer", DEBUG_SCOPES)
+                    _debug_print("Clear scope wrapper finalizer",
+                                 DEBUG["scopes"])
                     SessionStatus.scopes[request.scope].pop(
                         SessionStatus.scopes[request.scope].index(
                             request.fixturename))
@@ -237,7 +281,7 @@ def pytest_namespace():
                     func(*args, **kwargs)
                 except Exception as e:
                     _debug_print("Clear scope wrapper - exception caught {}".
-                                 format(e), DEBUG_SCOPES)
+                                 format(e), DEBUG["scopes"])
                 fin()
                 return
             return decorator.decorator(wrapper, func)
@@ -328,12 +372,12 @@ def _verify(fail_condition, fail_message, raise_immediately, warning,
     if warning:
         raise_immediately = False
 
-    _debug_print("'*** PERFORMING VERIFICATION ***", DEBUG_VERIFY)
+    _debug_print("'*** PERFORMING VERIFICATION ***", DEBUG["verify"])
     _debug_print("LOCALS: {}".format(inspect.getargvalues(inspect.stack()[1][0]).locals),
-                 DEBUG_VERIFY)
+                 DEBUG["verify"])
 
     def warning_init():
-        _debug_print("WARNING (fail_condition)", DEBUG_VERIFY)
+        _debug_print("WARNING (fail_condition)", DEBUG["verify"])
         info = ResultInfo("W", raise_immediately)
         status = "WARNING"
         exc_type = WarningException
@@ -394,7 +438,8 @@ def _get_complete_traceback(stack, start_depth, stop_at_test,
     # Print call lines or source code back to beginning of each calling
     # function (fullMethodTrace).
     if len(stack) > MAX_TRACEBACK_DEPTH:
-        _debug_print("Length of stack = {}".format(len(stack)), DEBUG_VERIFY)
+        _debug_print("Length of stack = {}".format(len(stack)),
+                     DEBUG["verify"])
         max_traceback_depth = MAX_TRACEBACK_DEPTH
     else:
         max_traceback_depth = len(stack)
@@ -428,7 +473,8 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
         call_line_number = stack[depth][2]
         module_line_parent = "{0[1]}:{0[2]}:{0[3]}".format(stack[depth])
         calling_frame_locals = ""
-        if INCLUDE_VERIFY_LOCALS:
+        if CONFIG["include_verify_local_vars"].value\
+                or CONFIG["include_all_local_vars"].value:
             try:
                 args = inspect.getargvalues(stack[depth][0]).locals.items()
                 calling_frame_locals = (", ".join("{}: {}".format(k, v)
@@ -436,7 +482,7 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
             except Exception:
                 pytest.log.step("Failed to retrieve local variables for {}".
                                 format(module_line_parent), log_level=5)
-        _debug_print("CALL: {}".format(module_line_parent), DEBUG_VERIFY)
+        _debug_print("CALL: {}".format(module_line_parent), DEBUG["verify"])
         if full_method_trace:
             for lineNumber in range(0, call_line_number - func_line_number):
                 source_line = re.sub('[\r\n]', '', func_source[0][lineNumber])
@@ -553,7 +599,8 @@ def print_saved_results(column_key_order="Step", extra_info=False):
     """
     if not isinstance(column_key_order, (tuple, list)):
         column_key_order = [column_key_order]
-    _debug_print("Column order: {}".format(column_key_order), DEBUG_PRINT_SAVED)
+    _debug_print("Column order: {}".format(column_key_order),
+                 DEBUG["print_saved"])
 
     key_val_lengths = {}
     if len(Verifications.saved_results) > 0:
@@ -620,7 +667,7 @@ def _get_key_lengths(key_val_lengths, extra_info):
     headings = {}
     for key, val in key_val_lengths.iteritems():
         _debug_print("key: {}, key length: {}, length of field from values "
-                     "{}".format(key, len(key), val), DEBUG_PRINT_SAVED)
+                     "{}".format(key, len(key), val), DEBUG["print_saved"])
         if not extra_info and key == "Extra Info":
             continue
         if len(key) > val:
@@ -631,13 +678,13 @@ def _get_key_lengths(key_val_lengths, extra_info):
                 slash_indices = [m.start() for m in re.finditer('/', key)]
                 space_indices.extend(slash_indices)
                 _debug_print("key can be split @ {}".format(space_indices),
-                             DEBUG_PRINT_SAVED)
+                             DEBUG["print_saved"])
                 key_centre_index = int(len(key)/2)
                 split_index = min(space_indices, key=lambda x: abs(
                     x - key_centre_index))
                 _debug_print('The closest index to the middle ({}) is {}'
                              .format(key_centre_index, split_index),
-                             DEBUG_PRINT_SAVED)
+                             DEBUG["print_saved"])
                 # Add the split key string as two strings (line 1, line
                 # 2) to the headings dictionary.
                 headings[key] = [key[:split_index+1].strip(),
@@ -702,5 +749,5 @@ def _print_headings(first_result, headings, key_val_lengths,
 
 def _debug_print(msg, flag):
     # Print a debug message if the corresponding flag is set.
-    if flag:
-        print msg
+    if flag.enabled:
+        print "DEBUG({}): {}".format(flag.name, msg)
