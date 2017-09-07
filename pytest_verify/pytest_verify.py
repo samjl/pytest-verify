@@ -22,7 +22,6 @@ class DebugFunctionality:
 
 class ConfigOption:
     def __init__(self, value_type, value_default):
-        # self.name = name
         self.value_type = value_type
         self.value = value_default
 
@@ -35,7 +34,9 @@ CONFIG = {"include_verify_local_vars": ConfigOption(bool, True),
           "include_all_local_vars": ConfigOption(bool, False),
           "traceback_stops_at_test_functions": ConfigOption(bool, True),
           "raise_warnings": ConfigOption(bool, True),
-          "maximum_traceback_depth": ConfigOption(int, 20)}
+          "maximum_traceback_depth": ConfigOption(int, 20),
+          "continue_on_setup_failure": ConfigOption(bool, False),
+          "continue_on_setup_warning": ConfigOption(bool, False)}
 
 SCOPE_ORDER = ("session", "class", "module", "function")
 
@@ -84,6 +85,15 @@ def pytest_runtest_setup(item):
     raised_exc = outcome.excinfo
     _debug_print("SETUP - Raised exception: {}".format(raised_exc),
                  DEBUG["phases"])
+
+    if not CONFIG["continue_on_setup_failure"].value:
+        # Re-raise first VerificationException not yet raised
+        # Saved and immediately raised VerificationExceptions are raised here.
+        _raise_first_saved_exc_type(VerificationException)
+        if not CONFIG["continue_on_setup_failure"].value:
+            # Else re-raise first WarningException not yet raised
+            _raise_first_saved_exc_type(WarningException)
+
     SessionStatus.phase = "call"
 
 
@@ -99,10 +109,12 @@ def pytest_pyfunc_call(pyfuncitem):
     if raised_exc:
         if raised_exc[0] not in (WarningException, VerificationException):
             # For exceptions other than Warning and Verifications:
-            # save the exceptions details and traceback so they are
+            # * save the exceptions details and traceback so they are
             # printed in the final test summary,
-            # re-raise the exception
-            _save_and_raise_non_verify_exc(raised_exc)
+            # * re-raise the exception
+            _save_non_verify_exc(raised_exc)
+            _set_saved_raised()
+            raise_(*raised_exc)
 
     # Re-raise first VerificationException not yet raised
     # Saved and immediately raised VerificationExceptions are raised here.
@@ -124,8 +136,15 @@ def pytest_runtest_teardown(item, nextitem):
     _debug_print("TEARDOWN - Raised exception: {}".format(raised_exc),
                  DEBUG["phases"])
 
+    # Re-raise first VerificationException not yet raised
+    # Saved and immediately raised VerificationExceptions are raised here.
+    _raise_first_saved_exc_type(VerificationException)
+    # Else re-raise first WarningException not yet raised
+    if CONFIG["raise_warnings"].value:
+        _raise_first_saved_exc_type(WarningException)
 
-def _save_and_raise_non_verify_exc(raised_exc):
+
+def _save_non_verify_exc(raised_exc):
     exc_type = "{}".format(str(raised_exc[0].__name__)[0])
     exc_msg = str(raised_exc[1]).strip().replace("\n", " ")
     result_info = ResultInfo(exc_type, True)
@@ -179,8 +198,6 @@ def _save_and_raise_non_verify_exc(raised_exc):
                               ('Message', exc_msg),
                               ('Status', "FAIL"),
                               ('Extra Info', result_info)]))
-    _set_saved_raised()
-    raise_(*raised_exc)  # Re-raise the assertion
 
 
 def _raise_first_saved_exc_type(type_to_raise):
@@ -196,6 +213,22 @@ def _raise_first_saved_exc_type(type_to_raise):
                 format(type_to_raise, exc_type, msg, tb)
             _set_saved_raised()
             raise_(exc_type, msg, tb)  # for python 2 and 3 compatibility
+
+
+def pytest_report_teststatus(report):
+    _debug_print("TEST REPORT PHASE {}".format(report.when), DEBUG["phases"])
+    _debug_print("Active setups: {}, {}".format(SessionStatus.scopes,
+                 _active_func_order(SessionStatus.scopes)), DEBUG["phases"])
+
+
+def print_new_results(phase):
+    for i, s_res in enumerate(Verifications.saved_results):
+        res_info = s_res["Extra Info"]
+        if res_info.phase == phase and not res_info.printed:
+            _debug_print("Valid result ({}) found with info: {}"
+                         .format(i, res_info.format_result_info()),
+                         DEBUG["phases"])
+            res_info.printed = True
 
 
 def pytest_terminal_summary(terminalreporter):
@@ -249,10 +282,30 @@ def pytest_namespace():
         def _set_scope(func):
             def wrapper(func, *args, **kwargs):
                 _debug_print("In set scope wrapper", DEBUG["scopes"])
+                exc_info = None
 
                 def fin():
                     _debug_print("Set scope wrapper finalizer",
                                  DEBUG["scopes"])
+                    print "*** GETTING SETUP RESULTS FOR {} ***".format(
+                        request.fixturename)
+                    if exc_info:
+                        _save_non_verify_exc(exc_info)
+                    print_new_results("setup")
+                    if exc_info:
+                        _set_saved_raised()
+                        raise_(*exc_info)  # Re-raise the assertion
+
+                    if not CONFIG["continue_on_setup_failure"].value:
+                        # Re-raise first VerificationException not yet raised.
+                        # Saved and immediately raised VerificationExceptions
+                        # are raised here.
+                        _raise_first_saved_exc_type(VerificationException)
+                        if not CONFIG["continue_on_setup_failure"].value and\
+                                CONFIG["raise_warnings"].value:
+                            # Else re-raise first WarningException not yet
+                            # raised
+                            _raise_first_saved_exc_type(WarningException)
 
                 SessionStatus.scopes[request.scope].append(
                     request.fixturename)
@@ -261,6 +314,7 @@ def pytest_namespace():
                 except Exception as e:
                     _debug_print("Set scope wrapper - exception caught {}".
                                  format(e), DEBUG["scopes"])
+                    exc_info = sys.exc_info()
                 fin()
                 return
             return decorator.decorator(wrapper, func)
@@ -270,6 +324,7 @@ def pytest_namespace():
         def _clear_scope(func):
             def wrapper(func, *args, **kwargs):
                 _debug_print("In clear scope wrapper", DEBUG["scopes"])
+                exc_info = None
 
                 def fin():  # not executed if teardown raises exception
                     _debug_print("Clear scope wrapper finalizer",
@@ -277,11 +332,29 @@ def pytest_namespace():
                     SessionStatus.scopes[request.scope].pop(
                         SessionStatus.scopes[request.scope].index(
                             request.fixturename))
+                    if exc_info:
+                        _save_non_verify_exc(exc_info)
+                    print "*** GETTING TEARDOWN RESULTS FOR {} ***".format(
+                        request.fixturename)
+                    print_new_results("teardown")
+                    if exc_info:
+                        _set_saved_raised()
+                        raise_(*exc_info)  # Re-raise the assertion
+
+                    # Re-raise first VerificationException not yet raised.
+                    # Saved and immediately raised VerificationExceptions are
+                    # raised here.
+                    _raise_first_saved_exc_type(VerificationException)
+                    # Else re-raise first WarningException not yet raised
+                    if CONFIG["raise_warnings"].value:
+                        _raise_first_saved_exc_type(WarningException)
+
                 try:
                     func(*args, **kwargs)
                 except Exception as e:
                     _debug_print("Clear scope wrapper - exception caught {}".
                                  format(e), DEBUG["scopes"])
+                    exc_info = sys.exc_info()
                 fin()
                 return
             return decorator.decorator(wrapper, func)
@@ -338,18 +411,18 @@ class ResultInfo:
         return "{0.tb_index}:{0.type_code}.{1}.{2}.{3}.({4}:{0.phase})". \
             format(self, "Y" if self.raise_immediately else "N",
                    "Y" if self.printed else "N", raised,
-                   ",".join(self.active_func_order()))
+                   ",".join(_active_func_order(json.loads(self.active_scopes))))
 
-    def active_func_order(self):
-        # Create a list of all the active setup functions in the order
-        # they were executed.
-        _debug_print(self.active_scopes, DEBUG_SCOPES)
-        active_scopes = json.loads(self.active_scopes)
-        func_order = []
-        for scope in SCOPE_ORDER:
-            if active_scopes[scope]:
-                func_order.extend(active_scopes[scope])
-        return func_order
+
+def _active_func_order(active_scopes):
+    # Create a list of all the active setup functions in the order
+    # they were executed.
+    func_order = []
+    for scope in SCOPE_ORDER:
+        if active_scopes[scope]:
+            func_order.extend(active_scopes[scope])
+    return func_order
+
 
 def _log_verification(msg, log_level):
     # Log the verification result.
@@ -618,13 +691,11 @@ def print_saved_results(column_key_order="Step", extra_info=False):
 
 def _print_result(result, key_val_lengths, column_key_order, extra_info):
     # Print a table row for a single saved result.
-    if not DEBUG_PRINT_SAVED and result["Extra Info"].printed:
-        return
     line = ""
     for key in column_key_order:
         # Print values in the order defined by column_key_order.
         length = key_val_lengths[key]
-        line += '| {0:^{width}} '.format(str(result[key]), width=length)
+        line += '| {0:^{1}} '.format(str(result[key]), length)
     for key in result.keys():
         if not extra_info and key == "Extra Info":
             continue
