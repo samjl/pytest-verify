@@ -21,22 +21,45 @@ class DebugFunctionality:
 
 
 class ConfigOption:
-    def __init__(self, value_type, value_default):
+    def __init__(self, value_type, value_default, helptext=""):
         self.value_type = value_type
         self.value = value_default
+        if self.value_type is bool:
+            help_for_bool = filter(None, [helptext, "Enable: 1/yes/true/on",
+                                   "Disable: 0/no/false/off"])
+            self.help = ". ".join(help_for_bool)
+        else:
+            self.help = helptext
 
-DEBUG = {"print_saved": DebugFunctionality("print saved", False),
+DEBUG = {"print-saved": DebugFunctionality("print saved", False),
          "verify": DebugFunctionality("verify", False),
          "phases": DebugFunctionality("phases", False),
          "scopes": DebugFunctionality("scopes", False)}
 
-CONFIG = {"include_verify_local_vars": ConfigOption(bool, True),
-          "include_all_local_vars": ConfigOption(bool, False),
-          "traceback_stops_at_test_functions": ConfigOption(bool, True),
-          "raise_warnings": ConfigOption(bool, True),
-          "maximum_traceback_depth": ConfigOption(int, 20),
-          "continue_on_setup_failure": ConfigOption(bool, False),
-          "continue_on_setup_warning": ConfigOption(bool, False)}
+CONFIG = {"include-verify-local-vars":
+          ConfigOption(bool, True, "Include local variables in tracebacks "
+                                   "created by verify function"),
+          "include-all-local-vars":
+          ConfigOption(bool, False, "Include local variables in all "
+                                    "tracebacks. Warning: Printing all locals "
+                                    "in a stack trace can easily lead to "
+                                    "problems due to errored output"),
+          "traceback-stops-at-test-functions":
+          ConfigOption(bool, True, "Stop the traceback at the test function"),
+          "raise-warnings":
+          ConfigOption(bool, True, "Raise warnings (enabled) or just save the "
+                                   "result (disabled)"),
+          "maximum-traceback-depth":
+          ConfigOption(int, 20, "Print up to the maximum limit (integer) of "
+                                "stack trace entries"),
+          "continue-on-setup-failure":
+          ConfigOption(bool, False, "Continue to the test call phase if the "
+                                    "setup fails"),
+          "continue-on-setup-warning":
+          ConfigOption(bool, False, "Continue to the test call phase if the "
+                                    "setup warns. To raise a setup warning "
+                                    "this must be set to False and "
+                                    "raise-warnings set to True")}
 
 SCOPE_ORDER = ("session", "class", "module", "function")
 
@@ -47,6 +70,14 @@ class WarningException(Exception):
 
 class VerificationException(Exception):
     pass
+
+
+def pytest_addoption(parser):
+    for name, val in CONFIG.iteritems():
+        parser.addoption("--{}".format(name),
+                         # type=val.value_type,
+                         action="store",
+                         help=val.help)
 
 
 @pytest.hookimpl(trylast=True)
@@ -72,6 +103,22 @@ def pytest_configure(config):
         except Exception as e:
             print e
 
+    for name, val in CONFIG.iteritems():
+        cmd_line_val = config.getoption("--{}".format(name))
+        if cmd_line_val:
+            if CONFIG[name].value_type is bool:
+                if cmd_line_val.lower() in ("1", "yes", "true", "on"):
+                    CONFIG[name].value = True
+                elif cmd_line_val.lower() in ("0", "no", "false", "off"):
+                    CONFIG[name].value = False
+            else:
+                CONFIG[name].value = CONFIG[name].value_type(cmd_line_val)
+
+    print "pytest-verify configuration:"
+    for option in CONFIG.keys():
+        print "{0}: type={1.value_type}, val={1.value}".format(option, CONFIG[
+            option])
+
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_setup(item):
@@ -86,11 +133,33 @@ def pytest_runtest_setup(item):
     _debug_print("SETUP - Raised exception: {}".format(raised_exc),
                  DEBUG["phases"])
 
-    if not CONFIG["continue_on_setup_failure"].value:
-        # Re-raise first VerificationException not yet raised
-        # Saved and immediately raised VerificationExceptions are raised here.
-        _raise_first_saved_exc_type(VerificationException)
-        if not CONFIG["continue_on_setup_failure"].value:
+    if raised_exc:
+        # Exception has been raised in the setup phase:
+        # Could be an exception:
+        # 1. raised by a setup function (save exception result),
+        # 2. raised by a setup function, caught, saved and re-raised by
+        #    the set_scope wrapper (don't re-save).
+        stack_trace = traceback.extract_tb(raised_exc[2])
+        if not stack_trace[-2][2] == "_set_scope_wrapper" and \
+                not stack_trace[-4][2] == "_set_scope_wrapper" and \
+                raised_exc[0] != VerificationException and \
+                raised_exc[0] != WarningException:
+            # Detect an exception NOT already re-raised by the scope
+            # wrapper. Save it so it is printed in the results table.
+            _save_non_verify_exc(raised_exc)
+        else:
+            _debug_print("SETUP - Found an exception already re-raised by "
+                         "wrapper", DEBUG["phases"])
+    else:
+        # Nothing raised so check if there are any saved results that
+        # need to be raised.
+        if not CONFIG["continue-on-setup-failure"].value:
+            # Re-raise first VerificationException not yet raised.
+            # Saved and immediately raised VerificationExceptions are
+            # raised here.
+            _raise_first_saved_exc_type(VerificationException)
+        if not CONFIG["continue-on-setup-warning"].value and \
+           CONFIG["raise-warnings"].value:
             # Else re-raise first WarningException not yet raised
             _raise_first_saved_exc_type(WarningException)
 
@@ -120,7 +189,7 @@ def pytest_pyfunc_call(pyfuncitem):
     # Saved and immediately raised VerificationExceptions are raised here.
     _raise_first_saved_exc_type(VerificationException)
     # Else re-raise first WarningException not yet raised
-    if CONFIG["raise_warnings"].value:
+    if CONFIG["raise-warnings"].value:
         _raise_first_saved_exc_type(WarningException)
 
 
@@ -136,12 +205,30 @@ def pytest_runtest_teardown(item, nextitem):
     _debug_print("TEARDOWN - Raised exception: {}".format(raised_exc),
                  DEBUG["phases"])
 
-    # Re-raise first VerificationException not yet raised
-    # Saved and immediately raised VerificationExceptions are raised here.
-    _raise_first_saved_exc_type(VerificationException)
-    # Else re-raise first WarningException not yet raised
-    if CONFIG["raise_warnings"].value:
-        _raise_first_saved_exc_type(WarningException)
+    if raised_exc:
+        # Exception has been raised in the setup phase:
+        # Could be an exception:
+        # 1. raised by a setup function (save exception result),
+        # 2. raised by a setup function, caught, saved and re-raised by
+        #    the set_scope wrapper (don't re-save).
+        stack_trace = traceback.extract_tb(raised_exc[2])
+        if not stack_trace[-2][2] == "_set_scope_wrapper" and \
+                not stack_trace[-4][2] == "_set_scope_wrapper" and \
+                raised_exc[0] != VerificationException and \
+                raised_exc[0] != WarningException:
+            # Detect an exception NOT already re-raised by the scope
+            # wrapper. Save it so it is printed in the results table.
+            _save_non_verify_exc(raised_exc)
+        else:
+            _debug_print("TEARDOWN - Found an exception already re-raised by "
+                         "wrapper", DEBUG["phases"])
+    else:
+        # Re-raise first VerificationException not yet raised
+        # Saved and immediately raised VerificationExceptions are raised here.
+        _raise_first_saved_exc_type(VerificationException)
+        # Else re-raise first WarningException not yet raised
+        if CONFIG["raise-warnings"].value:
+            _raise_first_saved_exc_type(WarningException)
 
 
 def _save_non_verify_exc(raised_exc):
@@ -156,8 +243,8 @@ def _save_non_verify_exc(raised_exc):
     # stack trace is None if source not available.
     trace_complete = []
     for tb_level in reversed(stack_trace):
-        if CONFIG["traceback_stops_at_test_functions"].value\
-                and _trace_end_detected(tb_level[3].strip()):
+        if CONFIG["traceback-stops-at-test-functions"].value\
+                and _trace_end_detected(tb_level[3]):
             break
         trace_complete.insert(0, ">   {0[3]}".format(tb_level))
 
@@ -166,7 +253,7 @@ def _save_non_verify_exc(raised_exc):
         # implemented in general in Python. Probably okay for
         # controlled purposes like verify traceback to test
         # function and no further.
-        if CONFIG["include_all_local_vars"].value:
+        if CONFIG["include-all-local-vars"].value:
             frame = raised_exc[2]
             tb_locals = []
             frame = frame.tb_next
@@ -180,7 +267,7 @@ def _save_non_verify_exc(raised_exc):
         trace_complete.insert(0, "{0[0]}:{0[1]}:{0[2]}".format(tb_level))
 
     source_locals = ""
-    if CONFIG["include_all_local_vars"].value:
+    if CONFIG["include-all-local-vars"].value:
         source_locals = trace_complete[-3]
 
     s_res = Verifications.saved_results
@@ -227,7 +314,7 @@ def print_new_results(phase):
         if res_info.phase == phase and not res_info.printed:
             _debug_print("Valid result ({}) found with info: {}"
                          .format(i, res_info.format_result_info()),
-                         DEBUG["phases"])
+                         DEBUG["scopes"])
             res_info.printed = True
 
 
@@ -280,31 +367,39 @@ def pytest_namespace():
 
     def set_scope(request):
         def _set_scope(func):
-            def wrapper(func, *args, **kwargs):
+            def _set_scope_wrapper(func, *args, **kwargs):
                 _debug_print("In set scope wrapper", DEBUG["scopes"])
                 exc_info = None
 
                 def fin():
                     _debug_print("Set scope wrapper finalizer",
                                  DEBUG["scopes"])
-                    print "*** GETTING SETUP RESULTS FOR {} ***".format(
-                        request.fixturename)
                     if exc_info:
-                        _save_non_verify_exc(exc_info)
+                        if exc_info[0] != VerificationException:
+                            # if WarningExceptions ever get raised
+                            # immediately case will have to be added here.
+                            _save_non_verify_exc(exc_info)
+                    _debug_print("getting setup results for {}".format(
+                        request.fixturename), DEBUG["scopes"])
                     print_new_results("setup")
                     if exc_info:
                         _set_saved_raised()
                         raise_(*exc_info)  # Re-raise the assertion
 
-                    if not CONFIG["continue_on_setup_failure"].value:
+                    if not CONFIG["continue-on-setup-failure"].value:
                         # Re-raise first VerificationException not yet raised.
                         # Saved and immediately raised VerificationExceptions
                         # are raised here.
+                        _debug_print("Set scope wrapper: raise first saved "
+                                     "exception if present", DEBUG["scopes"])
                         _raise_first_saved_exc_type(VerificationException)
-                        if not CONFIG["continue_on_setup_failure"].value and\
-                                CONFIG["raise_warnings"].value:
+                        if not CONFIG["continue-on-setup-warning"].value and\
+                                CONFIG["raise-warnings"].value:
                             # Else re-raise first WarningException not yet
                             # raised
+                            _debug_print("Set scope wrapper: raise first saved"
+                                         " warning if present",
+                                         DEBUG["scopes"])
                             _raise_first_saved_exc_type(WarningException)
 
                 SessionStatus.scopes[request.scope].append(
@@ -317,12 +412,12 @@ def pytest_namespace():
                     exc_info = sys.exc_info()
                 fin()
                 return
-            return decorator.decorator(wrapper, func)
+            return decorator.decorator(_set_scope_wrapper, func)
         return _set_scope
 
     def clear_scope(request):
         def _clear_scope(func):
-            def wrapper(func, *args, **kwargs):
+            def _clear_scope_wrapper(func, *args, **kwargs):
                 _debug_print("In clear scope wrapper", DEBUG["scopes"])
                 exc_info = None
 
@@ -333,20 +428,28 @@ def pytest_namespace():
                         SessionStatus.scopes[request.scope].index(
                             request.fixturename))
                     if exc_info:
-                        _save_non_verify_exc(exc_info)
-                    print "*** GETTING TEARDOWN RESULTS FOR {} ***".format(
-                        request.fixturename)
+                        if exc_info[0] != VerificationException:
+                            # if WarningExceptions ever get raised
+                            # immediately case will have to be added here.
+                            _save_non_verify_exc(exc_info)
+                    _debug_print("getting teardown results for {}".format(
+                        request.fixturename), DEBUG["scopes"])
                     print_new_results("teardown")
                     if exc_info:
                         _set_saved_raised()
                         raise_(*exc_info)  # Re-raise the assertion
+                        # TODO do we want it to raise? other teardowns do still run
 
                     # Re-raise first VerificationException not yet raised.
                     # Saved and immediately raised VerificationExceptions are
                     # raised here.
+                    _debug_print("Clear scope wrapper: raise first saved "
+                                 "exception if present", DEBUG["scopes"])
                     _raise_first_saved_exc_type(VerificationException)
                     # Else re-raise first WarningException not yet raised
-                    if CONFIG["raise_warnings"].value:
+                    if CONFIG["raise-warnings"].value:
+                        _debug_print("Clear scope wrapper: raise first saved "
+                                     "warning if present", DEBUG["scopes"])
                         _raise_first_saved_exc_type(WarningException)
 
                 try:
@@ -357,7 +460,7 @@ def pytest_namespace():
                     exc_info = sys.exc_info()
                 fin()
                 return
-            return decorator.decorator(wrapper, func)
+            return decorator.decorator(_clear_scope_wrapper, func)
         return _clear_scope
 
     name = {"verify": verify,
@@ -502,6 +605,7 @@ def _verify(fail_condition, fail_message, raise_immediately, warning,
 
     if not fail_condition and raise_immediately:
         # Raise immediately
+        _set_saved_raised()
         raise_(exc_type, msg, tb)
     return True
 
@@ -546,8 +650,8 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
         call_line_number = stack[depth][2]
         module_line_parent = "{0[1]}:{0[2]}:{0[3]}".format(stack[depth])
         calling_frame_locals = ""
-        if CONFIG["include_verify_local_vars"].value\
-                or CONFIG["include_all_local_vars"].value:
+        if CONFIG["include-verify-local-vars"].value\
+                or CONFIG["include-all-local-vars"].value:
             try:
                 args = inspect.getargvalues(stack[depth][0]).locals.items()
                 calling_frame_locals = (", ".join("{}: {}".format(k, v)
@@ -575,6 +679,8 @@ def _trace_end_detected(func_call_line):
     # Check for the stop keywords in the function call source line
     # (traceback). Returns True if keyword found and traceback is
     # complete, False otherwise.
+    if not func_call_line:
+        return False
     stop_keywords = ("runTest", "testfunction", "fixturefunc")
     return any(item in func_call_line for item in stop_keywords)
 
@@ -673,7 +779,7 @@ def print_saved_results(column_key_order="Step", extra_info=False):
     if not isinstance(column_key_order, (tuple, list)):
         column_key_order = [column_key_order]
     _debug_print("Column order: {}".format(column_key_order),
-                 DEBUG["print_saved"])
+                 DEBUG["print-saved"])
 
     key_val_lengths = {}
     if len(Verifications.saved_results) > 0:
@@ -738,7 +844,7 @@ def _get_key_lengths(key_val_lengths, extra_info):
     headings = {}
     for key, val in key_val_lengths.iteritems():
         _debug_print("key: {}, key length: {}, length of field from values "
-                     "{}".format(key, len(key), val), DEBUG["print_saved"])
+                     "{}".format(key, len(key), val), DEBUG["print-saved"])
         if not extra_info and key == "Extra Info":
             continue
         if len(key) > val:
@@ -749,13 +855,13 @@ def _get_key_lengths(key_val_lengths, extra_info):
                 slash_indices = [m.start() for m in re.finditer('/', key)]
                 space_indices.extend(slash_indices)
                 _debug_print("key can be split @ {}".format(space_indices),
-                             DEBUG["print_saved"])
+                             DEBUG["print-saved"])
                 key_centre_index = int(len(key)/2)
                 split_index = min(space_indices, key=lambda x: abs(
                     x - key_centre_index))
                 _debug_print('The closest index to the middle ({}) is {}'
                              .format(key_centre_index, split_index),
-                             DEBUG["print_saved"])
+                             DEBUG["print-saved"])
                 # Add the split key string as two strings (line 1, line
                 # 2) to the headings dictionary.
                 headings[key] = [key[:split_index+1].strip(),
