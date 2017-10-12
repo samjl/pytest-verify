@@ -381,6 +381,7 @@ def pytest_namespace():
                             _save_non_verify_exc(exc_info)
                     _debug_print("getting setup results for {}".format(
                         request.fixturename), DEBUG["scopes"])
+                    SessionStatus.current_scope = None
                     print_new_results("setup")
                     if exc_info:
                         _set_saved_raised()
@@ -404,6 +405,7 @@ def pytest_namespace():
 
                 SessionStatus.scopes[request.scope].append(
                     request.fixturename)
+                SessionStatus.current_scope = request.fixturename
                 try:
                     func(*args, **kwargs)
                 except Exception as e:
@@ -432,6 +434,7 @@ def pytest_namespace():
                             # if WarningExceptions ever get raised
                             # immediately case will have to be added here.
                             _save_non_verify_exc(exc_info)
+                    SessionStatus.current_scope = None
                     _debug_print("getting teardown results for {}".format(
                         request.fixturename), DEBUG["scopes"])
                     print_new_results("teardown")
@@ -452,6 +455,7 @@ def pytest_namespace():
                                      "warning if present", DEBUG["scopes"])
                         _raise_first_saved_exc_type(WarningException)
 
+                SessionStatus.current_scope = request.fixturename
                 try:
                     func(*args, **kwargs)
                 except Exception as e:
@@ -482,8 +486,11 @@ class SessionStatus:
     phase = None  # Current test phase. Possible phases: S(etup),
     # C(all), T(eardown)
     run_order = []  # Test function execution order
-    scopes = {"session": [], "module": [], "class": [], "function": []}
 
+    # Active setup functions
+    scopes = {"session": [], "module": [], "class": [], "function": []}
+    # Currently active setup or teardown fixture
+    current_scope = None
 
 class ResultInfo:
     # Instances of ResultInfo used to store information on every
@@ -501,6 +508,7 @@ class ResultInfo:
         self.source_locals = None
         self.phase = SessionStatus.phase
         self.active_scopes = json.dumps(SessionStatus.scopes)
+        self.current_scope = json.dumps(SessionStatus.current_scope)
 
     def format_result_info(self):
         # Format the result to a human readable string.
