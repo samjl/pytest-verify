@@ -169,7 +169,9 @@ def pytest_runtest_setup(item):
 @pytest.hookimpl(hookwrapper=True)
 def pytest_pyfunc_call(pyfuncitem):
     _debug_print("CALL - Starting {}".format(pyfuncitem), DEBUG["verify"])
+    SessionStatus.current_scope = pyfuncitem.name
     outcome = yield
+    SessionStatus.current_scope = None
     _debug_print("CALL - Completed {}, outcome {}".format(pyfuncitem, outcome),
                  DEBUG["verify"])
     # outcome.excinfo may be None or a (cls, val, tb) tuple
