@@ -33,8 +33,10 @@ class ConfigOption:
 
 DEBUG = {"print-saved": DebugFunctionality("print saved", False),
          "verify": DebugFunctionality("verify", False),
+         "not-plugin": DebugFunctionality("not-plugin", False),
          "phases": DebugFunctionality("phases", False),
-         "scopes": DebugFunctionality("scopes", False)}
+         "scopes": DebugFunctionality("scopes", False),
+         "summary": DebugFunctionality("summary", False)}
 
 CONFIG = {"include-verify-local-vars":
           ConfigOption(bool, True, "Include local variables in tracebacks "
@@ -122,8 +124,16 @@ def pytest_configure(config):
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_setup(item):
-    _debug_print("SETUP - Starting {}".format(item), DEBUG["phases"])
-    SessionStatus.run_order.append(item.name)  # Save the run order
+    _debug_print("SETUP - Starting setup for test {}".format(item.name),
+                 DEBUG["phases"])
+    _debug_print("SETUP - test {0.name} has fixtures: {0.fixturenames}".format(
+        item), DEBUG["scopes"])
+
+    # Set test session globals
+    SessionStatus.run_order.append(item.name)  # Save run order TODO remove?
+    SessionStatus.test_function = item.name  # same as run_order[-1]
+    # Ignore the last fixture name 'request'
+    SessionStatus.test_fixtures[item.name] = item.fixturenames[:-1]
     SessionStatus.phase = "setup"
     outcome = yield
     _debug_print("SETUP - Complete {}, outcome: {}".format(item, outcome),
@@ -163,20 +173,20 @@ def pytest_runtest_setup(item):
             # Else re-raise first WarningException not yet raised
             _raise_first_saved_exc_type(WarningException)
 
+    # TODO could this be done at start of pytest_pyfunc_call?
     SessionStatus.phase = "call"
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_pyfunc_call(pyfuncitem):
-    _debug_print("CALL - Starting {}".format(pyfuncitem), DEBUG["verify"])
-    SessionStatus.current_scope = pyfuncitem.name
+    _debug_print("CALL - Starting {}".format(pyfuncitem.name), DEBUG["phases"])
     outcome = yield
-    SessionStatus.current_scope = None
     _debug_print("CALL - Completed {}, outcome {}".format(pyfuncitem, outcome),
-                 DEBUG["verify"])
+                 DEBUG["phases"])
     # outcome.excinfo may be None or a (cls, val, tb) tuple
     raised_exc = outcome.excinfo
-    print "CALL - Caught exception: {}".format(raised_exc)
+    _debug_print("CALL - Caught exception: {}".format(raised_exc),
+                 DEBUG["phases"])
     if raised_exc:
         if raised_exc[0] not in (WarningException, VerificationException):
             # For exceptions other than Warning and Verifications:
@@ -236,42 +246,68 @@ def pytest_runtest_teardown(item, nextitem):
 def _save_non_verify_exc(raised_exc):
     exc_type = "{}".format(str(raised_exc[0].__name__)[0])
     exc_msg = str(raised_exc[1]).strip().replace("\n", " ")
+    _debug_print("Saving caught exception (non-plugin): {}, {}".format(
+        exc_type, exc_msg), DEBUG["not-plugin"])
     result_info = ResultInfo(exc_type, True)
 
     stack_trace = traceback.extract_tb(raised_exc[2])
+    frame = raised_exc[2]
     # stack_trace is a list of stack trace tuples for each
     # stack depth (filename, line number, function name*, text)
     # "text" only gets the first line of a call multi-line call
     # stack trace is None if source not available.
+
+    # Get the locals for each traceback entry - required to identify the
+    # fixture scope
+    # FIXME is there a better way to do this - have to cycle through all
+    # frames to get to the most recent
+    locals_all_frames = []
+    while frame:
+        locals_all_frames.append(frame.tb_frame.f_locals)
+        frame = frame.tb_next
+    # _debug_print("all frames locals: {}".format(locals_all_frames),
+    #              DEBUG["not-plugin"])
+
     trace_complete = []
-    for tb_level in reversed(stack_trace):
+    for i, tb_level in enumerate(reversed(stack_trace)):
         if CONFIG["traceback-stops-at-test-functions"].value\
                 and _trace_end_detected(tb_level[3]):
             break
         trace_complete.insert(0, ">   {0[3]}".format(tb_level))
-
-        # Printing all locals in a stack trace can easily lead to
-        # problems just due to errored output. That's why it is not
-        # implemented in general in Python. Probably okay for
-        # controlled purposes like verify traceback to test
-        # function and no further.
         if CONFIG["include-all-local-vars"].value:
-            frame = raised_exc[2]
-            tb_locals = []
-            frame = frame.tb_next
-            while frame:
-                tb_locals.append(frame.tb_frame.f_locals)
-                frame = frame.tb_next
-            trace_complete.insert(0, (", ".join("{}: {}".format(str(k).
-                replace("\n", " "), str(v).replace("\n", " "))
-                for k, v in tb_locals[-1]. iteritems())))
-
+            trace_complete.insert(0, locals_all_frames[-(i+1)])
         trace_complete.insert(0, "{0[0]}:{0[1]}:{0[2]}".format(tb_level))
 
-    source_locals = ""
-    if CONFIG["include-all-local-vars"].value:
-        source_locals = trace_complete[-3]
+    # Divide by 3 as each failure has 3 lines (list entries)
+    _debug_print("# of tracebacks: {}".format(len(trace_complete) / 3),
+                 DEBUG["not-plugin"])
+    _debug_print("length of locals: {}".format(len(locals_all_frames)),
+                 DEBUG["not-plugin"])
+    if DEBUG["not-plugin"]:
+        for line in trace_complete:
+            _debug_print(line, DEBUG["not-plugin"])
 
+    fixture_name = None
+    fixture_scope = None
+    for i, stack_locals in enumerate(reversed(locals_all_frames)):
+        # Most recent stack entry first
+        # Extract the setup/teardown fixture information if possible
+        # keep track of the fixture name and scope
+        if "self" in stack_locals:  # teardown
+            if isinstance(stack_locals["self"], FixtureDef):
+                fixture_name = stack_locals["self"].argname
+                fixture_scope = stack_locals["self"].scope
+                _debug_print("scope for {} is {} [{}]".format(fixture_name,
+                                                              fixture_scope,
+                                                              i),
+                             DEBUG["not-plugin"])
+        if fixture_name:
+            break
+
+    _debug_print("saving: {}, {}".format(fixture_name, fixture_scope),
+                 DEBUG["not-plugin"])
+
+    # TODO refactor the saved_results format- make it an object
     s_res = Verifications.saved_results
     s_tb = Verifications.saved_tracebacks
     s_tb.append({"type": raised_exc[0],
@@ -281,8 +317,10 @@ def _save_non_verify_exc(raised_exc):
                  "res_index": len(s_res)})
     result_info.tb_index = len(s_tb) - 1
     result_info.source_call = [trace_complete[-1]]
-    result_info.source_locals = source_locals
+    result_info.source_locals = locals_all_frames[-1]
     result_info.source_function = trace_complete[-2]
+    result_info.fixture_name = fixture_name
+    result_info.scope = fixture_scope
     s_res.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
                               ('Message', exc_msg),
                               ('Status', "FAIL"),
@@ -292,8 +330,8 @@ def _save_non_verify_exc(raised_exc):
 def _raise_first_saved_exc_type(type_to_raise):
     for i, saved_traceback in enumerate(Verifications.saved_tracebacks):
         exc_type = saved_traceback["type"]
-        _debug_print("saved traceback index: {}, type: {}".format(i, exc_type),
-                     DEBUG["verify"])
+        _debug_print("saved traceback index: {}, type: {}, searching for: {}"
+                     .format(i, exc_type, type_to_raise), DEBUG["verify"])
         if exc_type == type_to_raise and not saved_traceback["raised"]:
             msg = "{0[Message]} - {0[Status]}".format(
                 Verifications.saved_results[saved_traceback["res_index"]])
@@ -305,9 +343,12 @@ def _raise_first_saved_exc_type(type_to_raise):
 
 
 def pytest_report_teststatus(report):
-    _debug_print("TEST REPORT PHASE {}".format(report.when), DEBUG["phases"])
-    _debug_print("Active setups: {}, {}".format(SessionStatus.scopes,
-                 _active_func_order(SessionStatus.scopes)), DEBUG["phases"])
+    _debug_print("TEST REPORT FOR {} PHASE".format(report.when),
+                 DEBUG["phases"])
+    phase_results = get_recent_results(report.when)
+    _debug_print("{} - results: {}".format(report.when.upper(), phase_results),
+                 DEBUG["summary"])
+    report.status = phase_results
 
 
 def print_new_results(phase):
@@ -320,36 +361,77 @@ def print_new_results(phase):
             res_info.printed = True
 
 
+def get_recent_results(phase):
+    first_index = None
+    for i, s_res in enumerate(Verifications.saved_results):
+        res_info = s_res["Extra Info"]
+        if not res_info.retrieved and res_info.phase == phase:
+            if first_index is None:
+                first_index = i
+            res_info.retrieved = True
+
+    recent_results_by_type = {}
+    if first_index is not None:  # can only be None if the result is a pass
+        for index in range(first_index, len(Verifications.saved_results)):
+            res_info = Verifications.saved_results[index]["Extra Info"]
+            if not res_info.type_code in recent_results_by_type:
+                recent_results_by_type[res_info.type_code] = 1
+            else:
+                recent_results_by_type[res_info.type_code] += 1
+
+    return first_index, len(Verifications.saved_results)-1, \
+        recent_results_by_type
+
+
 def pytest_terminal_summary(terminalreporter):
     """ override the terminal summary reporting. """
-    print "In pytest_terminal_summary"
-    print "Run order: {}".format(", ".join(SessionStatus.run_order))
+    _debug_print("In pytest_terminal_summary", DEBUG["summary"])
+    _debug_print("Run order: {}".format(", ".join(SessionStatus.run_order)),
+                 DEBUG["summary"])
+    for test_name, setup_fixtures in SessionStatus.test_fixtures.iteritems():
+        _debug_print("{} depends on setup fixtures: {}"
+                     .format(test_name, ", ".join(setup_fixtures)),
+                     DEBUG["summary"])
 
     # Retrieve the saved results and traceback info for any failed
     # verifications.
-    print_saved_results()
-
-    saved_results = Verifications.saved_results
-    pytest.log.high_level_step("Saved results")
-    for saved_res in saved_results:
-        pytest.log.step(saved_res)
-        pytest.log.step(saved_res["Extra Info"].format_result_info())
-        pytest.log.step(saved_res["Extra Info"].source_function)
-        if saved_res["Extra Info"].source_locals:
-            pytest.log.step(saved_res["Extra Info"].source_locals)
-        for line in saved_res["Extra Info"].source_call:
-            pytest.log.step(line)
+    print_saved_results(extra_info=True)
 
     saved_tracebacks = Verifications.saved_tracebacks
-    pytest.log.high_level_step("Saved tracebacks")
+    if saved_tracebacks:
+        pytest.log.high_level_step("Saved tracebacks")
     for i, saved_tb in enumerate(saved_tracebacks):
-        pytest.log.step(saved_tb)
         for line in saved_tb["complete"]:
             pytest.log.step(line)
         exc_type = saved_tb["type"]
         pytest.log.step("{0}{1[Message]}".format("{}: ".format(
                         exc_type.__name__) if exc_type else "",
                         Verifications.saved_results[saved_tb["res_index"]]))
+
+    # Collect all the results for each reported phase/scope(/fixture)
+    result_by_fixture = OrderedDict()
+    _debug_print("Scope/phase saved results summary in executions order:",
+                 DEBUG["summary"])
+    for saved_result in Verifications.saved_results:
+        info = saved_result["Extra Info"]
+        key = "{0.fixture_name}:{0.test_function}:{0.phase}:{0.scope}"\
+            .format(info)
+        if key not in result_by_fixture:
+            result_by_fixture[key] = {}
+            result_by_fixture[key][info.type_code] = 1
+        elif info.type_code not in result_by_fixture[key]:
+            result_by_fixture[key][info.type_code] = 1
+        else:
+            result_by_fixture[key][info.type_code] += 1
+    for key, val in result_by_fixture.iteritems():
+        _debug_print("{}: {}".format(key, val), DEBUG["summary"])
+
+    pytest_reports = terminalreporter.stats
+    reports_total = sum(len(v) for k, v in pytest_reports.items())
+    _debug_print("{} reports:".format(reports_total), DEBUG["summary"])
+    for report_type, reports in pytest_reports.iteritems():
+        for report in reports:
+            _debug_print(report, DEBUG["summary"])
 
 
 def pytest_namespace():
@@ -367,112 +449,8 @@ def pytest_namespace():
         """
         return Verifications.saved_results, Verifications.saved_tracebacks
 
-    def set_scope(request):
-        def _set_scope(func):
-            def _set_scope_wrapper(func, *args, **kwargs):
-                _debug_print("In set scope wrapper", DEBUG["scopes"])
-                exc_info = None
-
-                def fin():
-                    _debug_print("Set scope wrapper finalizer",
-                                 DEBUG["scopes"])
-                    if exc_info:
-                        if exc_info[0] != VerificationException:
-                            # if WarningExceptions ever get raised
-                            # immediately case will have to be added here.
-                            _save_non_verify_exc(exc_info)
-                    _debug_print("getting setup results for {}".format(
-                        request.fixturename), DEBUG["scopes"])
-                    SessionStatus.current_scope = None
-                    print_new_results("setup")
-                    if exc_info:
-                        _set_saved_raised()
-                        raise_(*exc_info)  # Re-raise the assertion
-
-                    if not CONFIG["continue-on-setup-failure"].value:
-                        # Re-raise first VerificationException not yet raised.
-                        # Saved and immediately raised VerificationExceptions
-                        # are raised here.
-                        _debug_print("Set scope wrapper: raise first saved "
-                                     "exception if present", DEBUG["scopes"])
-                        _raise_first_saved_exc_type(VerificationException)
-                        if not CONFIG["continue-on-setup-warning"].value and\
-                                CONFIG["raise-warnings"].value:
-                            # Else re-raise first WarningException not yet
-                            # raised
-                            _debug_print("Set scope wrapper: raise first saved"
-                                         " warning if present",
-                                         DEBUG["scopes"])
-                            _raise_first_saved_exc_type(WarningException)
-
-                SessionStatus.scopes[request.scope].append(
-                    request.fixturename)
-                SessionStatus.current_scope = request.fixturename
-                try:
-                    func(*args, **kwargs)
-                except Exception as e:
-                    _debug_print("Set scope wrapper - exception caught {}".
-                                 format(e), DEBUG["scopes"])
-                    exc_info = sys.exc_info()
-                fin()
-                return
-            return decorator.decorator(_set_scope_wrapper, func)
-        return _set_scope
-
-    def clear_scope(request):
-        def _clear_scope(func):
-            def _clear_scope_wrapper(func, *args, **kwargs):
-                _debug_print("In clear scope wrapper", DEBUG["scopes"])
-                exc_info = None
-
-                def fin():  # not executed if teardown raises exception
-                    _debug_print("Clear scope wrapper finalizer",
-                                 DEBUG["scopes"])
-                    SessionStatus.scopes[request.scope].pop(
-                        SessionStatus.scopes[request.scope].index(
-                            request.fixturename))
-                    if exc_info:
-                        if exc_info[0] != VerificationException:
-                            # if WarningExceptions ever get raised
-                            # immediately case will have to be added here.
-                            _save_non_verify_exc(exc_info)
-                    SessionStatus.current_scope = None
-                    _debug_print("getting teardown results for {}".format(
-                        request.fixturename), DEBUG["scopes"])
-                    print_new_results("teardown")
-                    if exc_info:
-                        _set_saved_raised()
-                        raise_(*exc_info)  # Re-raise the assertion
-                        # TODO do we want it to raise? other teardowns do still run
-
-                    # Re-raise first VerificationException not yet raised.
-                    # Saved and immediately raised VerificationExceptions are
-                    # raised here.
-                    _debug_print("Clear scope wrapper: raise first saved "
-                                 "exception if present", DEBUG["scopes"])
-                    _raise_first_saved_exc_type(VerificationException)
-                    # Else re-raise first WarningException not yet raised
-                    if CONFIG["raise-warnings"].value:
-                        _debug_print("Clear scope wrapper: raise first saved "
-                                     "warning if present", DEBUG["scopes"])
-                        _raise_first_saved_exc_type(WarningException)
-
-                SessionStatus.current_scope = request.fixturename
-                try:
-                    func(*args, **kwargs)
-                except Exception as e:
-                    _debug_print("Clear scope wrapper - exception caught {}".
-                                 format(e), DEBUG["scopes"])
-                    exc_info = sys.exc_info()
-                fin()
-                return
-            return decorator.decorator(_clear_scope_wrapper, func)
-        return _clear_scope
-
     name = {"verify": verify,
-            "get_saved_results": get_saved_results,
-            "set_scope": set_scope,
-            "clear_scope": clear_scope}
+            "get_saved_results": get_saved_results}
     return name
 
 
@@ -488,29 +466,38 @@ class SessionStatus:
     phase = None  # Current test phase. Possible phases: S(etup),
     # C(all), T(eardown)
     run_order = []  # Test function execution order
+    test_fixtures = OrderedDict()
 
     # Active setup functions
     scopes = {"session": [], "module": [], "class": [], "function": []}
     # Currently active setup or teardown fixture
-    current_scope = None
+    test_function = None
+
 
 class ResultInfo:
     # Instances of ResultInfo used to store information on every
     # verification (originating from the verify function) performed.
     def __init__(self, type_code, raise_immediately):
+        # Identify the result
+        self.phase = SessionStatus.phase
+        self.scope = None
+        self.test_function = SessionStatus.test_function
+        self.fixture_name = None
+
         # Type codes:
         # "P": pass, "W": WarningException, "F": VerificationException
         # "A": AssertionError, "O": any Other exception
         self.type_code = type_code
-        self.raise_immediately = raise_immediately
-        self.printed = False
-        self.tb_index = "-"
         self.source_function = None
         self.source_call = None
         self.source_locals = None
-        self.phase = SessionStatus.phase
-        self.active_scopes = json.dumps(SessionStatus.scopes)
-        self.current_scope = json.dumps(SessionStatus.current_scope)
+
+        self.tb_index = "-"
+
+        self.raise_immediately = raise_immediately
+
+        self.printed = False
+        self.retrieved = False
 
     def format_result_info(self):
         # Format the result to a human readable string.
@@ -521,20 +508,10 @@ class ResultInfo:
                 raised = "N"
         else:
             raised = "-"
-        return "{0.tb_index}:{0.type_code}.{1}.{2}.{3}.({4}:{0.phase})". \
-            format(self, "Y" if self.raise_immediately else "N",
-                   "Y" if self.printed else "N", raised,
-                   ",".join(_active_func_order(json.loads(self.active_scopes))))
-
-
-def _active_func_order(active_scopes):
-    # Create a list of all the active setup functions in the order
-    # they were executed.
-    func_order = []
-    for scope in SCOPE_ORDER:
-        if active_scopes[scope]:
-            func_order.extend(active_scopes[scope])
-    return func_order
+        return "{0.tb_index}:{0.type_code}.{1}.{2}.{3}.({0.phase}:{0.scope}:" \
+               "{0.fixture_name})({0.test_function})".format(self,
+               "Y" if self.raise_immediately else "N",
+               "Y" if self.printed else "N", raised)
 
 
 def _log_verification(msg, log_level):
@@ -558,8 +535,8 @@ def _verify(fail_condition, fail_message, raise_immediately, warning,
     if warning:
         raise_immediately = False
 
-    _debug_print("'*** PERFORMING VERIFICATION ***", DEBUG["verify"])
-    _debug_print("LOCALS: {}".format(inspect.getargvalues(inspect.stack()[1][0]).locals),
+    _debug_print("Performing verification", DEBUG["verify"])
+    _debug_print("Locals: {}".format(inspect.getargvalues(inspect.stack()[1][0]).locals),
                  DEBUG["verify"])
 
     def warning_init():
@@ -609,7 +586,11 @@ def _verify(fail_condition, fail_message, raise_immediately, warning,
         info, status, exc_type, tb = pass_init()
         msg = fail_message
 
-    pytest.log.step("{} - {}".format(msg, status))
+    if not log_level and pytest.redirect.get_current_level() == 1:
+        verify_msg_log_level = 2
+    else:
+        verify_msg_log_level = log_level
+    pytest.log.step("{} - {}".format(msg, status), verify_msg_log_level)
     _save_result(info, msg, status, tb, exc_type, stop_at_test,
                  full_method_trace)
 
@@ -650,7 +631,8 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
     calling_source = []
     try:
         func_source = inspect.getsourcelines(stack[depth][0])
-    except Exception:
+    except Exception as e:
+        _debug_print("{}".format(str(e)), DEBUG["verify"])
         return
     else:
         func_line_number = func_source[1]
@@ -666,10 +648,10 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
                 args = inspect.getargvalues(stack[depth][0]).locals.items()
                 calling_frame_locals = (", ".join("{}: {}".format(k, v)
                                         for k, v in args))
-            except Exception:
+            except Exception as e:
                 pytest.log.step("Failed to retrieve local variables for {}".
                                 format(module_line_parent), log_level=5)
-        _debug_print("CALL: {}".format(module_line_parent), DEBUG["verify"])
+                _debug_print("{}".format(str(e)), DEBUG["verify"])
         if full_method_trace:
             for lineNumber in range(0, call_line_number - func_line_number):
                 source_line = re.sub('[\r\n]', '', func_source[0][lineNumber])
@@ -712,6 +694,24 @@ def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
     stack = inspect.stack()
     depth = 3
 
+    _debug_print("Saving a result of verify function", DEBUG["verify"])
+    fixture_name = None
+    fixture_scope = None
+    if SessionStatus.phase != "call":
+        for d in range(depth, depth+6):  # TODO use max tb depth?
+            stack_locals = OrderedDict(inspect.getargvalues(stack[d][0]).
+                                       locals.items())
+            if "self" in stack_locals:  # teardown
+                if isinstance(stack_locals["self"], FixtureDef):
+                    fixture_name = stack_locals["self"].argname
+                    fixture_scope = stack_locals["self"].scope
+                    _debug_print("scope for {} is {} [{}]".format(fixture_name,
+                                                                  fixture_scope,
+                                                                  d),
+                                 DEBUG["verify"])
+            if fixture_name:
+                break
+
     r = result_info
     r.source_function, r.source_locals, r.source_call = \
         _get_calling_func(stack, depth, True, full_method_trace)
@@ -735,7 +735,8 @@ def _save_result(result_info, msg, status, tb, exc_type, stop_at_test,
                      'raised': False,
                      "res_index": len(s_res)})
         result_info.tb_index = len(s_tb) - 1
-
+    result_info.fixture_name = fixture_name
+    result_info.scope = fixture_scope
     s_res.append(OrderedDict([('Step', pytest.redirect.get_current_l1_msg()),
                               ('Message', msg),
                               ('Status', status),
@@ -791,21 +792,31 @@ def print_saved_results(column_key_order="Step", extra_info=False):
     _debug_print("Column order: {}".format(column_key_order),
                  DEBUG["print-saved"])
 
+    to_print = []
+    for saved_result in Verifications.saved_results:
+        data = OrderedDict()
+        for key, val in saved_result.iteritems():
+            if key != "Extra Info":
+                data[key] = val
+        if extra_info:
+            data["phase"] = saved_result["Extra Info"].phase
+            data["scope"] = saved_result["Extra Info"].scope
+            data["test_function"] = saved_result["Extra Info"].test_function
+            data["fixture_name"] = saved_result["Extra Info"].fixture_name
+        to_print.append(data)
+
     key_val_lengths = {}
-    if len(Verifications.saved_results) > 0:
-        _get_val_lengths(Verifications.saved_results, key_val_lengths,
-                         extra_info)
-        headings = _get_key_lengths(key_val_lengths, extra_info)
+    if len(to_print) > 0:
+        _get_val_lengths(to_print, key_val_lengths)
+        headings = _get_key_lengths(key_val_lengths)
         pytest.log.high_level_step("Saved results")
-        _print_headings(Verifications.saved_results[0], headings,
-                        key_val_lengths, column_key_order, extra_info)
-
-        for result in Verifications.saved_results:
-            _print_result(result, key_val_lengths, column_key_order,
-                          extra_info)
+        _print_headings(to_print[0], headings, key_val_lengths,
+                        column_key_order)
+        for result in to_print:
+            _print_result(result, key_val_lengths, column_key_order)
 
 
-def _print_result(result, key_val_lengths, column_key_order, extra_info):
+def _print_result(result, key_val_lengths, column_key_order):
     # Print a table row for a single saved result.
     line = ""
     for key in column_key_order:
@@ -813,8 +824,6 @@ def _print_result(result, key_val_lengths, column_key_order, extra_info):
         length = key_val_lengths[key]
         line += '| {0:^{1}} '.format(str(result[key]), length)
     for key in result.keys():
-        if not extra_info and key == "Extra Info":
-            continue
         key = key.strip()
         if key not in column_key_order:
             length = key_val_lengths[key]
@@ -827,13 +836,11 @@ def _print_result(result, key_val_lengths, column_key_order, extra_info):
     pytest.log.detail_step(line)
 
 
-def _get_val_lengths(saved_results, key_val_lengths, extra_info):
+def _get_val_lengths(saved_results, key_val_lengths):
     # Update the maximum field length dictionary based on the length of
     # the values.
     for result in saved_results:
         for key, value in result.items():
-            if not extra_info and key == "Extra Info":
-                continue
             key = key.strip()
             if key not in key_val_lengths:
                 key_val_lengths[key] = 0
@@ -845,7 +852,7 @@ def _get_val_lengths(saved_results, key_val_lengths, extra_info):
             key_val_lengths[key] = length
 
 
-def _get_key_lengths(key_val_lengths, extra_info):
+def _get_key_lengths(key_val_lengths):
     # Compare the key lengths to the max length of the corresponding
     # value.
 
@@ -855,8 +862,6 @@ def _get_key_lengths(key_val_lengths, extra_info):
     for key, val in key_val_lengths.iteritems():
         _debug_print("key: {}, key length: {}, length of field from values "
                      "{}".format(key, len(key), val), DEBUG["print-saved"])
-        if not extra_info and key == "Extra Info":
-            continue
         if len(key) > val:
             # The key is longer then the value length
             if ' ' in key or '/' in key:
@@ -904,7 +909,7 @@ def _get_line_length(key_val_lengths):
 
 
 def _print_headings(first_result, headings, key_val_lengths,
-                    column_key_order, extra_info):
+                    column_key_order):
     # Print the headings of the saved results table (keys of
     # dictionaries stored in saved_results).
     lines = ["", "", ""]
@@ -917,8 +922,6 @@ def _print_headings(first_result, headings, key_val_lengths,
                 headings[key][line_index], width=field_length) + ' '
         lines[2] += '|-' + '-'*field_length + '-'
     for key, value in first_result.items():
-        if not extra_info and key == "Extra Info":
-            continue
         key = key.strip()
         if not (((type(column_key_order) is list) and
                  (key in column_key_order)) or

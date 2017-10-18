@@ -1,8 +1,6 @@
 from pytest import (
     log,
     verify,
-    set_scope,
-    clear_scope,
     fixture,
     skip
 )
