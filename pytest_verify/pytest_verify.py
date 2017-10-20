@@ -157,6 +157,7 @@ def pytest_runtest_setup(item):
             # Detect an exception NOT already re-raised by the scope
             # wrapper. Save it so it is printed in the results table.
             _save_non_verify_exc(raised_exc)
+            _set_saved_raised()
         else:
             _debug_print("SETUP - Found an exception already re-raised by "
                          "wrapper", DEBUG["phases"])
@@ -231,6 +232,7 @@ def pytest_runtest_teardown(item, nextitem):
             # Detect an exception NOT already re-raised by the scope
             # wrapper. Save it so it is printed in the results table.
             _save_non_verify_exc(raised_exc)
+            _set_saved_raised()
         else:
             _debug_print("TEARDOWN - Found an exception already re-raised by "
                          "wrapper", DEBUG["phases"])
