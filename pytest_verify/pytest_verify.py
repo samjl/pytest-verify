@@ -647,9 +647,8 @@ def _get_calling_func(stack, depth, stop_at_test, full_method_trace):
         if CONFIG["include-verify-local-vars"].value\
                 or CONFIG["include-all-local-vars"].value:
             try:
-                args = inspect.getargvalues(stack[depth][0]).locals.items()
-                calling_frame_locals = (", ".join("{}: {}".format(k, v)
-                                        for k, v in args))
+                calling_frame_locals = dict(inspect.getargvalues(stack[depth]
+                                            [0]).locals.items())
             except Exception as e:
                 pytest.log.step("Failed to retrieve local variables for {}".
                                 format(module_line_parent), log_level=5)
