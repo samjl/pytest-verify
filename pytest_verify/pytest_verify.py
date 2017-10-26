@@ -11,7 +11,8 @@ import time
 import traceback
 from collections import OrderedDict
 from future.utils import raise_
-from _pytest.python import FixtureDef
+from _pytest.python import FixtureDef, Module, Class
+from _pytest.main import Session
 
 MAX_TRACEBACK_DEPTH = 20
 
@@ -131,12 +132,34 @@ def pytest_runtest_setup(item):
     _debug_print("SETUP - test {0.name} has fixtures: {0.fixturenames}".format(
         item), DEBUG["scopes"])
 
+    SessionStatus.class_name = None
+    SessionStatus.module = None
+
+    def get_module_class(item):
+        if isinstance(item.parent, Class):
+            _debug_print("Class is {}".format(item.parent.name),
+                         DEBUG["scopes"])
+            SessionStatus.class_name = item.parent.name
+        if isinstance(item.parent, Module):
+            _debug_print("Module is {}".format(item.parent.name),
+                         DEBUG["scopes"])
+            SessionStatus.module = item.parent.name
+            return
+        next_item = item.parent
+        if "parent" in next_item.__dict__.keys():
+            if next_item.parent:
+                get_module_class(next_item)
+        else:
+            return
+    get_module_class(item)
+
     # Set test session globals
     # Run order - tuples of (parent module, test function name)
-    SessionStatus.run_order.append((item.parent.name, item.name))
+    SessionStatus.run_order.append((SessionStatus.module,
+                                    SessionStatus.class_name,
+                                    item.name))
     # TODO use SessionStatus.run_order[-1][1] instead of test_function
     SessionStatus.test_function = item.name
-    SessionStatus.module = item.parent.name  # FIXME could be class?
     # TODO module if initial parent was class, otherwise session
     # item.parent.parent.name
     # Ignore the last fixture name 'request' TODO test if always true
@@ -366,8 +389,9 @@ def pytest_terminal_summary(terminalreporter):
     _debug_print("In pytest_terminal_summary", DEBUG["summary"])
     if DEBUG["summary"]:
         _debug_print("Run order:", DEBUG["summary"])
-        for module_test_function in SessionStatus.run_order:
-            print "{0[0]}::{0[1]}".format(module_test_function)
+        for module_class_function in SessionStatus.run_order:
+            _debug_print("{0[0]}::{0[1]}::{0[2]}".format(module_class_function)
+                         , DEBUG["summary"])
 
     # if DEBUG["verify"]:
     #     print "Saved Results (dictionaries)"
@@ -423,69 +447,86 @@ def pytest_terminal_summary(terminalreporter):
         _debug_print("{}: {}".format(key, val), DEBUG["summary"])
 
     # Search backwards through the fixture results to find setup results
-    for module_test_function in SessionStatus.run_order:
-        module = module_test_function[0]
-        test_function = module_test_function[1]
+    for module_class_function in SessionStatus.run_order:
+        module_name, class_name, test_function = module_class_function
         _debug_print("Getting results for {}".format(test_function),
                      DEBUG["summary"])
         _debug_print("Setup teardown fixture results to collate: {}".format(
             SessionStatus.test_fixtures[test_function]), DEBUG["summary"])
 
-        # TODO if no fixtures in setup_results the phase must be passed
-        fixtures = SessionStatus.test_fixtures[test_function]
+        # TODO if no fixtures in fixture_results the phase must be passed
+        # fixtures = SessionStatus.test_fixtures[test_function]
 
-        s_r = Verifications.saved_results
-        setup_results = {}
-        # TODO All session setups
-        # TODO class setups
-        # Module scoped setup and teardown results
-        m = filter(lambda x: x.module == module and x.scope == "module", s_r)
-        setup_results["module"] = {
-            "setup": filter(lambda x: x.phase == "setup", m),
-            "teardown": filter(lambda x: x.phase == "teardown", m)
-        }
-        # Function scoped setup and teardown results
-        f = filter(lambda x: x.test_function == test_function and
-                   x.scope == "function", s_r)
-        setup_results["function"] = {
-            "setup": filter(lambda x: x.phase == "setup", f),
-            "teardown": filter(lambda x: x.phase == "teardown", f)
-        }
-        c = filter(lambda x: x.test_function == test_function and
-                   x.phase == "call", s_r)
+        def filter_scope_phase(result_att, scope, scope_name):
+            s_r = Verifications.saved_results
+            scope_results = filter(lambda x: getattr(x, result_att) == scope_name
+                                   and x.scope == scope, s_r)
+            return {
+                "setup": filter(lambda y: y.phase == "setup", scope_results),
+                "teardown": filter(lambda z: z.phase == "teardown",
+                                   scope_results)
+            }
 
-        _debug_print("module setup:      {}".format(setup_results["module"]
-            ["setup"]), DEBUG["summary"])
-        _debug_print("function setup:    {}".format(setup_results["function"]
-            ["setup"]), DEBUG["summary"])
-        _debug_print("call:              {}".format(c), DEBUG["summary"])
-        _debug_print("function teardown: {}".format(setup_results["function"]
-            ["teardown"]), DEBUG["summary"])
-        _debug_print("module teardown:   {}".format(setup_results["module"]
-            ["teardown"]), DEBUG["summary"])
+        # Filter the saved results by fixture scope (module, class, function)
+        # and then by phase (setup, teardown).
+        fixture_results = {
+            "module": filter_scope_phase("module", "module", module_name),
+            "class": filter_scope_phase("class_name", "class", class_name),
+            "function": filter_scope_phase("test_function", "function",
+                                           test_function)
+        }
+        # Call (test function) results
+        call = filter(lambda x: x.test_function == test_function and
+                      x.phase == "call", Verifications.saved_results)
+
+        _debug_print("module setup:      {}".format(fixture_results["module"]
+                     ["setup"]), DEBUG["summary"])
+        _debug_print("class setup:       {}".format(fixture_results["class"]
+                     ["setup"]), DEBUG["summary"])
+        _debug_print("function setup:    {}".format(fixture_results["function"]
+                     ["setup"]), DEBUG["summary"])
+        _debug_print("call:              {}".format(call), DEBUG["summary"])
+        _debug_print("function teardown: {}".format(fixture_results["function"]
+                     ["teardown"]), DEBUG["summary"])
+        _debug_print("class teardown:    {}".format(fixture_results["class"]
+                     ["teardown"]), DEBUG["summary"])
+        _debug_print("module teardown:   {}".format(fixture_results["module"]
+                     ["teardown"]), DEBUG["summary"])
 
     pytest_reports = terminalreporter.stats
     reports_total = sum(len(v) for k, v in pytest_reports.items())
     _debug_print("{} reports:".format(reports_total), DEBUG["summary"])
-    ps = []
+    parsed_reports = []
     total_session_duration = 0
     for report_type, reports in pytest_reports.iteritems():
         for report in reports:
             _debug_print(report, DEBUG["summary"])
-            p = {"type": report_type,
-                 "test function": report.location[2],
-                 "phase": report.when,
-                 "pytest-outcome": report.outcome,
-                 "duration": report.duration}
-            ps.append(p)
+            parsed_report = {
+                "type": report_type,
+                # test report location[2] for a standalone test function
+                # within a module is just the function name, for class
+                # based tests it is in the format:
+                # class_name.test_function_name
+                "test function": report.location[2].split(".")[-1],
+                "phase": report.when,
+                "pytest-outcome": report.outcome,
+                "duration": report.duration
+            }
+            parsed_reports.append(parsed_report)
             total_session_duration += report.duration
 
     # Sort the pytest reports by test execution order then test phase
-    d = {"setup": 1, "call": 2, "teardown": 3}
-    r = [x[1] for x in SessionStatus.run_order]
-    ps.sort(key=lambda x: (r.index(x["test function"]), d[x["phase"]]))
-    for x in ps:
-        _debug_print(x, DEBUG["summary"])
+    phase_order = {
+        "setup": 1,
+        "call": 2,
+        "teardown": 3
+    }
+    test_function_run_order = [class_module_test[-1] for class_module_test in
+                               SessionStatus.run_order]
+    parsed_reports.sort(key=lambda x: (test_function_run_order.index(
+        x["test function"]), phase_order[x["phase"]]))
+    for parsed_report in parsed_reports:
+        _debug_print(parsed_report, DEBUG["summary"])
 
     session_duration = time.time() - terminalreporter._sessionstarttime
     _debug_print("Session duration: {}s (sum of phases: {}s)".format(
@@ -527,6 +568,9 @@ class SessionStatus:
     test_fixtures = OrderedDict()  # Test function: list of fixtures
     test_function = None  # Currently active setup or teardown fixture
 
+    module = None
+    class_name = None
+
 
 class Result(object):
     """Object used to save a result of the verify function or
@@ -556,6 +600,7 @@ class Result(object):
         self.raise_immediately = raise_immediately
 
         # Information about source of the result
+        self.class_name = SessionStatus.class_name
         self.module = SessionStatus.module
         self.phase = SessionStatus.phase
         self.scope = scope
@@ -571,6 +616,7 @@ class Result(object):
         f["Message"] = self.msg
         f["Status"] = self.status
         if DEBUG["summary"]:
+            f["Class"] = self.class_name
             f["Module"] = self.module
             f["Phase"] = self.phase
             f["Scope"] = self.scope
