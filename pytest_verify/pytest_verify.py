@@ -277,7 +277,7 @@ def pytest_runtest_teardown(item, nextitem):
 
 
 def _save_non_verify_exc(raised_exc):
-    exc_type = "{}".format(str(raised_exc[0].__name__)[0])
+    exc_type = "O"
     exc_msg = str(raised_exc[1]).strip().replace("\n", " ")
     _debug_print("Saving caught exception (non-plugin): {}, {}".format(
         exc_type, exc_msg), DEBUG["not-plugin"])
