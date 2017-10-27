@@ -460,7 +460,7 @@ def pytest_terminal_summary(terminalreporter):
 
         fixture_results = {}
         for phase in ("setup", "teardown"):
-            fixture_results[phase] = {}
+            fixture_results[phase] = {"overall": {}}
             # Module scoped fixtures
             m_res = _filter_scope_phase("module", "module", module_name, phase)
             fixture_results[phase]["module"] = _filter_fixture(m_res)
@@ -476,13 +476,13 @@ def pytest_terminal_summary(terminalreporter):
         call = filter(lambda x: x.test_function == test_function and
                       x.phase == "call", Verifications.saved_results)
         call_res_summary = _results_summary(call)
-        fixture_results["call"] = {"saved": [call, call_res_summary]}
-
+        fixture_results["call"] = {"results": call,
+                                   "overall": {"saved": call_res_summary}}
         test_results[test_function] = fixture_results
 
     pytest_reports = terminalreporter.stats
     reports_total = sum(len(v) for k, v in pytest_reports.items())
-    _debug_print("{} reports:".format(reports_total), DEBUG["summary"])
+    _debug_print("{} pytest reports".format(reports_total), DEBUG["summary"])
     total_session_duration = 0
     for report_type, reports in pytest_reports.iteritems():
         for report in reports:
@@ -497,33 +497,131 @@ def pytest_terminal_summary(terminalreporter):
             # based tests it is in the format:
             # class_name.test_function_name
             test_results[report.location[2].split(".")[-1]][report.when][
-                "pytest"] = parsed_report
+                "overall"]["pytest"] = parsed_report
+
+    for test_function, test_result in test_results.iteritems():
+        for phase in ("setup", "teardown"):
+            test_result[phase]["overall"]["saved"] = {}
+            for scope in ("module", "class", "function"):
+                for fixture_name, fixture_result in test_result[phase][scope]\
+                        .iteritems():
+                    for k, v in fixture_result[-1].iteritems():
+                        if k in test_result[phase]["overall"]["saved"]:
+                            test_result[phase]["overall"]["saved"][k] += v
+                        else:
+                            test_result[phase]["overall"]["saved"][k] = v
+            # Overall phase result (use the plugins saved results and the
+            # pytest report outcome
+            test_result[phase]["overall"]["result"] = _phase_specific_result(
+                phase, _get_phase_summary_result(test_result[phase]["overall"]))
+        test_result["call"]["overall"]["result"] = \
+            _get_phase_summary_result(test_result["call"]["overall"])
+
+        test_result["overall"] = _get_test_summary_result(
+            test_result["setup"]["overall"]["result"],
+            test_result["call"]["overall"]["result"],
+            test_result["teardown"]["overall"]["result"])
 
     for test_function, fixture_results in test_results.iteritems():
         for phase in ("setup", "call", "teardown"):
-            if phase == "call":
-                print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
-                    test_function, phase, "None", "None",
-                    fixture_results[phase]["saved"])
-            elif phase == "setup":
+            if phase == "setup":
                 for scope in ("module", "class", "function"):
                     for fixture_name, results in fixture_results[phase][scope]\
                             .iteritems():
-                        print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
-                            test_function, phase, scope, fixture_name, results)
-            else:
+                        results_id = [hex(id(x))[-4:] for x in results[0:-1]]
+                        print "{0:<20}{1:<10}{2:<10}{3:<25}{4:<40}{5}".format(
+                            test_function, phase, scope, fixture_name,
+                            results[-1], results_id)
+            elif phase == "teardown":
                 for scope in ("function", "class", "module"):
                     for fixture_name, results in fixture_results[phase][scope]\
                             .iteritems():
-                        print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
-                            test_function, phase, scope, fixture_name, results)
-            print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
-                    test_function, phase, "overall", "pytest report",
-                    fixture_results[phase]["pytest"])
+                        results_id = [hex(id(x))[-4:] for x in results[0:-1]]
+                        print "{0:<20}{1:<10}{2:<10}{3:<25}{4:<40}{5}".format(
+                            test_function, phase, scope, fixture_name,
+                            results[-1], results_id)
+            elif phase == "call":
+                results_id = [hex(id(x))[-4:] for x in fixture_results[phase][
+                    "results"]]
+                print "{0:<20}{1:<10}{2:<10}{3:<25}{4:<40}{5}".format(
+                        test_function, phase, "overall", "saved results", "",
+                        results_id)
+            if "overall" in fixture_results[phase]:
+                print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
+                        test_function, phase, "overall", "-",
+                        fixture_results[phase]["overall"])
+        print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
+            test_function, "overall", "-", "-", fixture_results["overall"])
 
     session_duration = time.time() - terminalreporter._sessionstarttime
     _debug_print("Session duration: {}s (sum of phases: {}s)".format(
         session_duration, total_session_duration), DEBUG["summary"])
+
+
+def _get_phase_summary_result(overall):
+    # overall dict example contents
+    # {'pytest': {'pytest-outcome': 'failed',
+    #             'duration': 0.02312016487121582,
+    #             'type': 'error'},
+    # 'saved': {'P': 1, 'W': 1}}
+    outcome_hierarchy = (
+        # Skip
+        (lambda o: o["pytest"]["type"] == "skipped", "skipped"),
+        # Error/failure
+        # could add report type also
+        (lambda o: True in [x in o["saved"].keys() for x in ("A", "O")],
+         "failure"),
+        # Warning - hierarchical so if testing this we know there are no
+        # "A"'s or "O"'s
+        # could also check report type
+        (lambda o: True in ["W" in o["saved"].keys()],
+         "warning"),
+        # TODO expected fail, unexpected pass
+        # TODO collect errors? check for this before this stage
+
+        # Call phase reports as "failed" if setup warned/failed but
+        # continued. Mark as passed if above conditions don't indicate a
+        # failure/warning in call (i.e. ignore the report)
+    )
+
+    if "pytest" not in overall:
+        # TODO check this is the call phase
+        return "not run (no report)"
+    for result_condition, result_text in outcome_hierarchy:
+        if result_condition(overall):
+            return result_text
+    return "passed"
+
+
+def _get_test_summary_result(setup_result, call_result, teardown_result):
+    outcome_hierarchy = (
+        "setup skipped",
+        "skipped",
+        "teardown skipped",
+        "setup error",
+        "failed",
+        "teardown error",
+        "warning",
+        "setup warning",
+        "teardown warning"
+    )
+    for outcome in outcome_hierarchy:
+        if outcome in (setup_result, call_result, teardown_result):
+            return outcome
+    if setup_result == "setup passed" and call_result == "passed" and \
+            teardown_result == "teardown passed":
+        return "passed"
+    else:
+        return "Unknown result"
+
+
+def _phase_specific_result(phase, summary_result):
+    if phase in ("setup", "teardown"):
+        if summary_result == "failure":
+            summary_result = "error"
+        return "{} {}".format(phase, summary_result)
+    else:
+        return summary_result
 
 
 def _filter_scope_phase(result_att, scope, scope_name, phase):
@@ -645,15 +743,17 @@ class Result(object):
             f["Scope"] = self.scope
             f["Fixture Name"] = self.fixture_name
             f["Test Function"] = self.test_function
-            f["ID"] = hex(id(self))[-3:]
-            f["Tb ID"] = hex(id(self.traceback_link))[-3:] if \
+            f["ID"] = hex(id(self))[-4:]
+            f["Tb ID"] = hex(id(self.traceback_link))[-4:] if \
                 self.traceback_link else None
             if self.traceback_link:
                 raised = "Y" if self.traceback_link.raised else "N"
             else:
                 raised = "-"
-            e = "{}.{}.{}".format("Y" if self.raise_immediately else "N",
-                                     "Y" if self.printed else "N", raised)
+            e = "{}.{}.{}.{}".format(self.type_code,
+                                     "Y" if self.raise_immediately else "N",
+                                     "Y" if self.printed else "N",
+                                     raised)
             f["Extra"] = e
         return f
 
