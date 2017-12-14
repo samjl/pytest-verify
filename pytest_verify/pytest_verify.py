@@ -692,7 +692,7 @@ OUTCOME_HIERARCHY = (
 
 
 def _get_test_summary_result(setup_result, call_result, teardown_result):
-    for outcome in OUTCOME_HIERARCHY[:10]:
+    for outcome in OUTCOME_HIERARCHY[:11]:
         if outcome in (setup_result, call_result, teardown_result):
             return outcome
     if setup_result == "setup passed" and call_result == "passed" and \
