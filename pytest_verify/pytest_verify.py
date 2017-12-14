@@ -11,6 +11,9 @@ import time
 import traceback
 from collections import OrderedDict
 from future.utils import raise_
+from _pytest.runner import CollectReport
+from _pytest.skipping import show_xfailed, show_xpassed, show_skipped
+from _pytest.terminal import WarningReport
 from _pytest.main import Session
 from _pytest.python import Module, Class
 try:
@@ -483,25 +486,53 @@ def pytest_terminal_summary(terminalreporter):
                                    "overall": {"saved": call_res_summary}}
         test_results[test_function] = fixture_results
 
+    # Parse the pytest reports
+    # Extract report type, outcome, duration, when (phase), location (test
+    # function).
+    # Session based reports (CollectReport, (pytest-)WarningReport) are
+    # collated for printing later.
     pytest_reports = terminalreporter.stats
     reports_total = sum(len(v) for k, v in pytest_reports.items())
     _debug_print("{} pytest reports".format(reports_total), DEBUG["summary"])
     total_session_duration = 0
+    collect_error_reports = []
+    pytest_warning_reports = []
+    summary_results = {}
     for report_type, reports in pytest_reports.iteritems():
         for report in reports:
-            parsed_report = {
-                "type": report_type,
-                "pytest-outcome": report.outcome,
-                "duration": report.duration
-            }
-            total_session_duration += report.duration
-            # test report location[2] for a standalone test function
-            # within a module is just the function name, for class
-            # based tests it is in the format:
-            # class_name.test_function_name
-            test_results[report.location[2].split(".")[-1]][report.when][
-                "overall"]["pytest"] = parsed_report
+            _debug_print("Report type: {}, report: {}".format(
+                report_type, report), DEBUG["summary"])
+            if isinstance(report, CollectReport):
+                # Don't add to test_results dictionary
+                _debug_print("Found CollectReport", DEBUG["summary"])
+                collect_error_reports.append(report)
+                if "collection error" not in summary_results:
+                    summary_results["collection error"] = 1
+                else:
+                    summary_results["collection error"] += 1
+            elif isinstance(report, WarningReport):
+                _debug_print("Found WarningReport", DEBUG["summary"])
+                pytest_warning_reports.append(report)
+                if "pytest-warning" not in summary_results:
+                    summary_results["pytest-warning"] = 1
+                else:
+                    summary_results["pytest-warning"] += 1
+            else:
+                parsed_report = {
+                    "type": report_type,
+                    "pytest-outcome": report.outcome,
+                    "duration": report.duration
+                }
+                total_session_duration += report.duration
+                # test report location[2] for a standalone test function
+                # within a module is just the function name, for class
+                # based tests it is in the format:
+                # class_name.test_function_name
+                test_results[report.location[2].split(".")[-1]][report.when][
+                    "overall"]["pytest"] = parsed_report
 
+    # For each test: determine the result for each phase and the overall test
+    # result.
     for test_function, test_result in test_results.iteritems():
         for phase in ("setup", "teardown"):
             test_result[phase]["overall"]["saved"] = {}
@@ -524,8 +555,14 @@ def pytest_terminal_summary(terminalreporter):
             test_result["setup"]["overall"]["result"],
             test_result["call"]["overall"]["result"],
             test_result["teardown"]["overall"]["result"])
+        # Increment the test result outcome counter
+        if test_result["overall"] not in summary_results:
+            summary_results[test_result["overall"]] = 1
+        else:
+            summary_results[test_result["overall"]] += 1
 
     for test_function, fixture_results in test_results.iteritems():
+        _debug_print("************************************", DEBUG["summary"])
         for phase in ("setup", "call", "teardown"):
             if phase == "setup":
                 for scope in ("module", "class", "function"):
@@ -556,9 +593,43 @@ def pytest_terminal_summary(terminalreporter):
         print "{0:<20}{1:<10}{2:<10}{3:<25}{4}".format(
             test_function, "overall", "-", "-", fixture_results["overall"])
 
+    # Print the expected fail, unexpected pass and skip reports exactly as
+    # pytest does.
+    lines = []
+    show_xfailed(terminalreporter, lines)
+    show_xpassed(terminalreporter, lines)
+    show_skipped(terminalreporter, lines)
+    # Print the reports of the collected
+    for report in collect_error_reports:
+        lines.append("COLLECTION ERROR {}".format(report.longrepr))
+    for report in pytest_warning_reports:
+        lines.append("PYTEST-WARNING {} {}".format(report.nodeid,
+                                                   report.message))
+    if lines:
+        print("collection error, skip, xFail/xPass and pytest-warning reasons "
+              "(short test summary info)")
+        for line in lines:
+            print(line)
+    else:
+        _debug_print("No collection errors, skips, xFail/xPass or pytest-"
+                     "warnings", DEBUG["summary"])
+
     session_duration = time.time() - terminalreporter._sessionstarttime
     _debug_print("Session duration: {}s (sum of phases: {}s)".format(
         session_duration, total_session_duration), DEBUG["summary"])
+    _debug_print(summary_results, DEBUG["summary"])
+
+    outcomes = []
+    for outcome in OUTCOME_HIERARCHY:
+        if outcome in summary_results:
+            outcomes.append("{} {}".format(summary_results[outcome], outcome))
+    print(", ".join(outcomes))
+
+
+def _print_summary(terminalreporter, report):
+    print "********** {} **********".format(report)
+    # writes directly - does not return anything
+    getattr(terminalreporter, "summary_{}".format(report))()
 
 
 def _get_phase_summary_result(overall):
@@ -570,17 +641,23 @@ def _get_phase_summary_result(overall):
     outcome_hierarchy = (
         # Skip
         (lambda o: o["pytest"]["type"] == "skipped", "skipped"),
+        # xFail
+        (lambda o: o["pytest"]["type"] == "xfailed", "expected failure"),
+        # xPass
+        (lambda o: o["pytest"]["type"] == "xpassed", "unexpected pass"),
         # Error/failure
         # could add report type also
-        (lambda o: True in [x in o["saved"].keys() for x in ("A", "O")],
+        (lambda o: True in [x in o["saved"].keys() for x in ("A", "O", "F")],
          "failure"),
-        # Warning - hierarchical so if testing this we know there are no
-        # "A"'s or "O"'s
-        # could also check report type
+        # this list is hierarchical so if testing this condition we know there
+        # are no "A"'s, "O"'s or "F"'s
+        # Warning
         (lambda o: True in ["W" in o["saved"].keys()],
          "warning"),
-        # TODO expected fail, unexpected pass
-        # TODO collect errors? check for this before this stage
+
+        # Otherwise (no saved results) pass if report outcome is passed
+        # could also check report type
+        # (lambda o: o["pytest"]["pytest-outcome"] == "passed", "passed")
 
         # Call phase reports as "failed" if setup warned/failed but
         # continued. Mark as passed if above conditions don't indicate a
@@ -596,19 +673,26 @@ def _get_phase_summary_result(overall):
     return "passed"
 
 
-def _get_test_summary_result(setup_result, call_result, teardown_result):
-    outcome_hierarchy = (
+OUTCOME_HIERARCHY = (
         "setup skipped",
         "skipped",
         "teardown skipped",
         "setup error",
-        "failed",
+        "failure",
         "teardown error",
         "warning",
         "setup warning",
-        "teardown warning"
+        "teardown warning",
+        "expected failure",
+        "unexpected pass",
+        "passed",
+        "pytest-warning",
+        "collection error"
     )
-    for outcome in outcome_hierarchy:
+
+
+def _get_test_summary_result(setup_result, call_result, teardown_result):
+    for outcome in OUTCOME_HIERARCHY[:10]:
         if outcome in (setup_result, call_result, teardown_result):
             return outcome
     if setup_result == "setup passed" and call_result == "passed" and \
