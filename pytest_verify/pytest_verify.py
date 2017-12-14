@@ -11,8 +11,13 @@ import time
 import traceback
 from collections import OrderedDict
 from future.utils import raise_
-from _pytest.python import FixtureDef, Module, Class
 from _pytest.main import Session
+from _pytest.python import Module, Class
+try:
+    from _pytest.fixtures import FixtureDef
+except ImportError:
+    # pytest version < 3.0.0
+    from _pytest.python import FixtureDef
 
 MAX_TRACEBACK_DEPTH = 20
 
@@ -325,14 +330,12 @@ def _save_non_verify_exc(raised_exc):
         # Most recent stack entry first
         # Extract the setup/teardown fixture information if possible
         # keep track of the fixture name and scope
-        if "self" in stack_locals:  # teardown
-            if isinstance(stack_locals["self"], FixtureDef):
-                fixture_name = stack_locals["self"].argname
-                fixture_scope = stack_locals["self"].scope
+        for item in stack_locals.values():
+            if isinstance(item, FixtureDef):
+                fixture_name = item.argname
+                fixture_scope = item.scope
                 _debug_print("scope for {} is {} [{}]".format(fixture_name,
-                                                              fixture_scope,
-                                                              i),
-                             DEBUG["not-plugin"])
+                             fixture_scope, i), DEBUG["not-plugin"])
         if fixture_name:
             break
 
@@ -950,14 +953,13 @@ def _save_result(msg, status, exc_type, exc_tb, stop_at_test,
         for d in range(depth, depth+6):  # TODO use max tb depth?
             stack_locals = OrderedDict(inspect.getargvalues(stack[d][0]).
                                        locals.items())
-            if "self" in stack_locals:  # teardown
-                if isinstance(stack_locals["self"], FixtureDef):
-                    fixture_name = stack_locals["self"].argname
-                    fixture_scope = stack_locals["self"].scope
+            for item in stack_locals.values():
+                print item
+                if isinstance(item, FixtureDef):
+                    fixture_name = item.argname
+                    fixture_scope = item.scope
                     _debug_print("scope for {} is {} [{}]".format(fixture_name,
-                                                                  fixture_scope,
-                                                                  d),
-                                 DEBUG["verify"])
+                                 fixture_scope, d), DEBUG["verify"])
             if fixture_name:
                 break
 
